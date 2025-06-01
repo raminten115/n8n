@@ -1584,4 +1584,1227 @@ def all_data_audit_get():
     # Output: flat list of dict, one per file (sama persis dengan backend utama)
     return JSONResponse(content=all_files)
 
-Lakukan analisis audit dan debug problem mendalam, komprehensif, dan advanced investigation.
+10. batch_agent_experta.py
+
+from experta import *
+import os
+
+class File(Fact):
+    """File data untuk batch orchestration"""
+    pass
+
+class OrchestrationAgent(KnowledgeEngine):
+    def __init__(self, batch_limit=15000):
+        super().__init__()
+        self.batch_limit = batch_limit
+        self.result_plan = []
+        self.used_quota = 0
+        print(f"[DEBUG] OrchestrationAgent initialized with batch_limit={batch_limit}")
+
+    @DefFacts()
+    def _initial_action(self):
+        print("[DEBUG] DefFacts _initial_action triggered")
+        yield Fact(start=True)
+
+    # Rule: Proses file kecil dulu, batch size = semua datanya
+    @Rule(
+        File(size=MATCH.size, processed=MATCH.processed, total=MATCH.total, name=MATCH.name),
+        TEST(lambda size, processed, total: size <= 1000 and processed < total)
+    )
+    def small_file(self, size, processed, total, name):
+        print(f"[DEBUG] Rule small_file triggered for {name}: size={size}, processed={processed}, total={total}")
+        self.result_plan.append({'file': name, 'batch_size': 'all'})
+        print(f'File kecil {name} akan diproses seluruhnya.')
+
+    # Rule: Untuk file besar, batch dynamic sesuai sisa kuota
+    @Rule(
+        File(size=MATCH.size, processed=MATCH.processed, total=MATCH.total, name=MATCH.name),
+        TEST(lambda size, processed, total: size > 1000 and processed < total)
+    )
+    def big_file(self, size, processed, total, name):
+        print(f"[DEBUG] Rule big_file triggered for {name}: size={size}, processed={processed}, total={total}, used_quota={self.used_quota}")
+        remaining = total - processed
+        available = self.batch_limit - self.used_quota
+        batch_size = min(available, remaining)
+        if batch_size > 0:
+            self.result_plan.append({'file': name, 'batch_size': batch_size})
+            self.used_quota += batch_size
+            print(f'File besar {name}, batch_size = {batch_size}')
+        else:
+            print(f'Kuota batch habis, skip {name}.')
+
+    # Rule: Jika kuota batch habis, stop
+    @Rule(Fact(start=True), TEST(lambda self: getattr(self, "used_quota", 0) >= getattr(self, "batch_limit", 0)))
+    def quota_exceeded(self):
+        print('[DEBUG] Rule quota_exceeded triggered')
+        print('Kuota batch sudah habis, tidak proses file lain.')
+
+def get_batch_plan(file_status_list, batch_limit=15000):
+    print(f"[DEBUG] get_batch_plan called with batch_limit={batch_limit}")
+    try:
+        engine = OrchestrationAgent(batch_limit=batch_limit)
+        engine.reset()
+        # Prioritaskan file kecil (size <= 1000) terlebih dahulu
+        sorted_list = sorted(file_status_list, key=lambda x: (x['size'], x['name']))
+        print(f"[DEBUG] get_batch_plan sorted_list={sorted_list}")
+        for file_info in sorted_list:
+            print(f"[DEBUG] Declaring File: {file_info}")
+            engine.declare(File(
+                name=file_info['name'],
+                size=file_info['size'],
+                total=file_info['total'],
+                processed=file_info['processed']
+            ))
+        print("[DEBUG] Running engine")
+        engine.run()
+        print(f"[DEBUG] get_batch_plan result_plan={engine.result_plan}")
+        return engine.result_plan
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] get_batch_plan failed: {e}")
+        # Fallback: Plan nothing if error
+        return []
+
+11. upload_frontend_data.py
+
+from fastapi import APIRouter, Request
+import os
+import json
+from progress_manager import ProgressManager
+
+router = APIRouter()
+
+DATA_DIR = r"C:\Users\ASUS\kpifinance-api\backend-python\data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+@router.post("/upload_frontend_data")
+async def upload_frontend_data(request: Request):
+    print("[DEBUG] upload_frontend_data: called")
+    data = await request.json()
+    print(f"[DEBUG] upload_frontend_data: received data type={type(data)}, keys={list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+    filepath = os.path.join(DATA_DIR, "frontend_data.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"[DEBUG] upload_frontend_data: data saved to {filepath}")
+
+    # PATCH: Sinkronisasi progress/meta setelah upload data (hybrid fallback)
+    pm = ProgressManager(DATA_DIR)
+    try:
+        pm.sync_progress_with_files()
+        print("[DEBUG] upload_frontend_data: progress/meta sync selesai (hybrid)")
+    except Exception as e:
+        print(f"[upload_frontend_data][HYBRID-FALLBACK] sync_progress_with_files error: {e}")
+        # Fallback: tidak fatal, lanjutkan saja, progress/meta akan disinkronkan otomatis di proses lain
+
+    return {"status": "ok", "saved_to": filepath}
+
+12. smart_file_loader.py
+
+import os
+import json
+import hashlib
+import importlib
+from functools import lru_cache
+from progress_manager import ProgressManager
+
+# Try-imports for dependencies
+def try_import(name):
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+pd = try_import("pandas")
+dask = try_import("dask.dataframe")
+joblib = try_import("joblib")
+orjson = try_import("orjson")
+aiofiles = try_import("aiofiles")
+chardet = try_import("chardet")
+pyarrow = try_import("pyarrow")
+gzip = try_import("gzip")
+pdfplumber = try_import("pdfplumber")
+docx = try_import("docx")
+pptx = try_import("pptx")
+odf = try_import("odf")
+np = try_import("numpy")
+camelot = try_import("camelot")
+rapidfuzz = try_import("rapidfuzz")
+fuzzywuzzy = try_import("fuzzywuzzy")
+pydantic = try_import("pydantic")
+watchdog = try_import("watchdog")
+
+if not chardet:
+    raise ImportError("chardet is required for encoding detection")
+
+DATA_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+#-----------------#
+# CSV/JSON Loader #
+#-----------------#
+def is_csv(filename): return str(filename).strip().lower().endswith('.csv')
+def is_json(filename): return str(filename).strip().lower().endswith('.json')
+
+def detect_encoding(filepath):
+    with open(filepath, 'rb') as f:
+        result = chardet.detect(f.read(10000))
+    return result['encoding'] or 'utf-8'
+
+def load_csv(filepath):
+    try:
+        if not os.path.isfile(filepath):
+            print(f"[ERROR] CSV file not found: {filepath}")
+            return [], [], os.path.splitext(os.path.basename(filepath))[0]
+        encoding = detect_encoding(filepath)
+        if pd:
+            df = pd.read_csv(filepath, encoding=encoding, dtype=str, engine='python')
+            df.columns = [c.encode('utf-8').decode('utf-8-sig').strip() for c in df.columns]
+            columns = list(df.columns)
+            data = df.fillna('').to_dict(orient='records')
+        else:
+            import csv
+            with open(filepath, encoding=encoding) as f:
+                reader = csv.DictReader(f)
+                columns = reader.fieldnames or []
+                data = [row for row in reader]
+        return data, columns, os.path.splitext(os.path.basename(filepath))[0]
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] CSV loader failed: {filepath}: {e}")
+        try:
+            with open(filepath, encoding='utf-8') as f:
+                header = f.readline().strip().split(',')
+                data = [dict(zip(header, line.strip().split(','))) for line in f if line.strip()]
+            return data, header, os.path.splitext(os.path.basename(filepath))[0]
+        except Exception as e2:
+            print(f"[HYBRID-FALLBACK][ERROR] CSV fallback failed: {filepath}: {e2}")
+            return [], [], os.path.splitext(os.path.basename(filepath))[0]
+
+def extract_json_records(obj):
+    if isinstance(obj, list):
+        if all(isinstance(item, dict) for item in obj):
+            return obj
+        flattened = []
+        for item in obj:
+            flattened.extend(extract_json_records(item))
+        return flattened
+    if isinstance(obj, dict) and "data" in obj and isinstance(obj["data"], list):
+        return extract_json_records(obj["data"])
+    if isinstance(obj, dict) and all(isinstance(v, list) for v in obj.values()) and len(obj) > 0:
+        flattened = []
+        for v in obj.values():
+            flattened.extend(extract_json_records(v))
+        return flattened
+    if isinstance(obj, dict):
+        return [obj]
+    return []
+
+def is_meta_file(table_name):
+    lower = table_name.lower()
+    if lower.endswith('_meta') or lower.endswith('gdrive_meta'):
+        return True
+    if lower.startswith('csvjson_gdrive_meta') or lower.startswith('other_gdrive_meta'):
+        return True
+    return False
+
+def load_json(filepath):
+    try:
+        if not os.path.isfile(filepath):
+            print(f"[ERROR] JSON file not found: {filepath}")
+            return [], [], os.path.splitext(os.path.basename(filepath))[0]
+        with open(filepath, 'r', encoding='utf-8') as f:
+            obj = json.load(f)
+            data = extract_json_records(obj)
+            if not (isinstance(data, list) and all(isinstance(row, dict) for row in data)):
+                return [], [], os.path.splitext(os.path.basename(filepath))[0]
+        columns = []
+        for row in data:
+            if isinstance(row, dict):
+                columns.extend(list(row.keys()))
+        columns = list(dict.fromkeys(columns))
+        return data, columns, os.path.splitext(os.path.basename(filepath))[0]
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] JSON loader failed: {filepath}: {e}")
+        try:
+            data = []
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            data.append(row)
+                    except Exception:
+                        continue
+            columns = []
+            for row in data:
+                if isinstance(row, dict):
+                    columns.extend(list(row.keys()))
+            columns = list(dict.fromkeys(columns))
+            return data, columns, os.path.splitext(os.path.basename(filepath))[0]
+        except Exception as e2:
+            print(f"[HYBRID-FALLBACK][ERROR] JSON line fallback failed: {filepath}: {e2}")
+            return [], [], os.path.splitext(os.path.basename(filepath))[0]
+
+def normalize_filename(fname):
+    return fname.strip().lower().replace(" ", "")
+
+@lru_cache(maxsize=16)
+def get_all_csv_json_files(data_folder=DATA_FOLDER):
+    try:
+        files_on_disk = os.listdir(data_folder)
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] get_all_csv_json_files: {e}")
+        return tuple()
+    result_files = []
+    for fname in files_on_disk:
+        fpath = os.path.join(data_folder, fname)
+        if not os.path.isfile(fpath):
+            continue
+        lower_fname = fname.strip().lower()
+        if lower_fname.endswith('.csv') or lower_fname.endswith('.json'):
+            result_files.append(fpath)
+    print("[smart_file_loader] CSV/JSON files detected in folder:", [os.path.basename(f) for f in result_files])
+    return tuple(result_files)
+
+def calc_sha256_from_obj(obj):
+    if orjson:
+        raw = orjson.dumps(obj)
+    else:
+        raw = json.dumps(obj, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def parallel_read_csv_json(files):
+    def _read(f):
+        if is_csv(f):
+            return load_csv(f)
+        elif is_json(f):
+            return load_json(f)
+        else:
+            return [], [], os.path.basename(f)
+    if joblib and len(files) > 1:
+        results = joblib.Parallel(n_jobs=-1)(
+            joblib.delayed(_read)(f) for f in files
+        )
+        return results
+    else:
+        return [_read(f) for f in files]
+
+def load_all_csv_json_tables(data_folder=DATA_FOLDER):
+    pm = ProgressManager(data_folder)
+    with pm.lock:
+        try:
+            files = list(get_all_csv_json_files(data_folder))
+            files_set = set(files)
+            files_disk = set(
+                os.path.join(data_folder, fname)
+                for fname in os.listdir(data_folder)
+                if os.path.isfile(os.path.join(data_folder, fname)) and (
+                    fname.strip().lower().endswith('.csv') or fname.strip().lower().endswith('.json')
+                )
+            )
+            missing_files = files_disk - files_set
+            if missing_files:
+                print("[smart_file_loader] New/untracked CSV/JSON files detected at runtime:", [os.path.basename(f) for f in missing_files])
+                files += list(missing_files)
+            results = parallel_read_csv_json(files)
+        except Exception as e:
+            print(f"[HYBRID-FALLBACK][ERROR] load_all_csv_json_tables: {e}")
+            files = []
+            results = []
+        tables = {}
+        for data, columns, table_name in results:
+            if is_meta_file(table_name):
+                continue
+            if is_json(table_name + ".json") and not (isinstance(data, list) and all(isinstance(row, dict) for row in data)):
+                continue
+            tables[table_name] = {'columns': columns, 'data': data}
+        return tables
+
+def get_first_csv_json_file_path(data_folder=DATA_FOLDER, table_name=None):
+    PRIORITY_EXTS = ['.csv', '.json']
+    try:
+        files = [
+            f for f in os.listdir(data_folder)
+            if os.path.isfile(os.path.join(data_folder, f)) and (is_csv(f) or is_json(f))
+        ]
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] get_first_csv_json_file_path: {e}")
+        return None, None, None
+    if table_name:
+        norm_table = normalize_filename(table_name)
+        for ext in PRIORITY_EXTS:
+            for f in files:
+                fname_noext, fext = os.path.splitext(f)
+                if normalize_filename(fname_noext) == norm_table and fext.lower() == ext:
+                    fpath = os.path.join(data_folder, f)
+                    return fpath, f, get_media_type(f)
+    for ext in PRIORITY_EXTS:
+        for f in files:
+            if f.lower().endswith(ext):
+                fpath = os.path.join(data_folder, f)
+                return fpath, f, get_media_type(f)
+    return None, None, None
+
+#------------------#
+# Multi-Format Tab #
+#------------------#
+def read_any_table(filepath):
+    ext = os.path.splitext(filepath)[-1].lower()
+    table_name = os.path.splitext(os.path.basename(filepath))[0]
+    columns = []
+    data = []
+    try:
+        # --- IMAGE TABLES ---
+        if ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff']:
+            data, columns, table_name = extract_table_from_image(filepath)
+        # --- EXCEL ---
+        elif ext in ['.xls', '.xlsx']:
+            if pd:
+                df = pd.read_excel(filepath, dtype=str, engine='openpyxl')
+                df.columns = [c.strip() for c in df.columns]
+                columns = list(df.columns)
+                data = df.fillna('').to_dict(orient='records')
+            else:
+                print(f"[ERROR] pandas required for Excel file: {filepath}")
+                data = []
+                columns = []
+        # --- PARQUET ---
+        elif ext == '.parquet':
+            if pd:
+                df = pd.read_parquet(filepath, engine='pyarrow')
+                df.columns = [c.strip() for c in df.columns]
+                columns = list(df.columns)
+                data = df.fillna('').to_dict(orient='records')
+            else:
+                print(f"[ERROR] pandas/pyarrow required for Parquet file: {filepath}")
+                data = []
+                columns = []
+        elif ext == '.gz' and filepath.lower().endswith('.parquet.gz'):
+            if pd and pyarrow and gzip:
+                with gzip.open(filepath, 'rb') as f:
+                    df = pd.read_parquet(f, engine='pyarrow')
+                df.columns = [c.strip() for c in df.columns]
+                columns = list(df.columns)
+                data = df.fillna('').to_dict(orient='records')
+            else:
+                print(f"[ERROR] pandas/pyarrow/gzip required for Parquet GZIP file: {filepath}")
+                data = []
+                columns = []
+        # --- PDF ---
+        elif ext == '.pdf':
+            if pdfplumber:
+                try:
+                    with pdfplumber.open(filepath) as pdf:
+                        all_tables = []
+                        all_columns = []
+                        for page in pdf.pages:
+                            tables = page.extract_tables()
+                            for table in tables:
+                                if table and len(table) > 1:
+                                    cols = table[0]
+                                    all_columns = [c.strip() if c else '' for c in cols]
+                                    for row in table[1:]:
+                                        all_tables.append({c: v for c, v in zip(all_columns, row)})
+                        if all_tables and all_columns:
+                            return all_tables, all_columns, table_name
+                except Exception as e:
+                    print(f"[ERROR] pdfplumber failed: {e}")
+            data, columns, table_name = extract_table_camelot_pdf(filepath)
+            if data and columns: return data, columns, table_name
+            try:
+                import tempfile
+                from pdf2image import convert_from_path
+                pages = convert_from_path(filepath)
+                for i, page_img in enumerate(pages):
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpf:
+                        page_img.save(tmpf.name)
+                        data, columns, table_name = extract_table_from_image(tmpf.name)
+                        if data and columns:
+                            return data, columns, table_name
+            except Exception as e:
+                print(f"[ERROR] PDF to image failed: {e}")
+            if pdfplumber:
+                with pdfplumber.open(filepath) as pdf:
+                    lines = []
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if text:
+                            lines += [line.strip() for line in text.split('\n') if line.strip()]
+                    data = [{'line': i, 'text': line} for i, line in enumerate(lines)]
+                    columns = ['line', 'text']
+                    return data, columns, table_name
+        # --- DOCX ---
+        elif ext == '.docx':
+            if docx:
+                from docx import Document
+                doc = Document(filepath)
+                data = []
+                columns = []
+                for table in doc.tables:
+                    keys = [cell.text.strip() for cell in table.rows[0].cells]
+                    columns = keys
+                    for row in table.rows[1:]:
+                        values = [cell.text.strip() for cell in row.cells]
+                        data.append(dict(zip(keys, values)))
+                if not data:
+                    for idx, para in enumerate(doc.paragraphs):
+                        t = para.text.strip()
+                        if t:
+                            data.append({'para_no': idx, 'text': t})
+                    columns = ['para_no', 'text']
+            else:
+                data = []
+                columns = []
+        # --- PPTX ---
+        elif ext == '.pptx':
+            if pptx:
+                from pptx import Presentation
+                prs = Presentation(filepath)
+                data = []
+                columns = []
+                for idx, slide in enumerate(prs.slides):
+                    title = ''
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text and not title:
+                            title = shape.text.strip()
+                        if hasattr(shape, "has_table") and shape.has_table:
+                            tbl = shape.table
+                            keys = [cell.text.strip() for cell in tbl.rows[0].cells]
+                            columns = keys
+                            for row in tbl.rows[1:]:
+                                values = [cell.text.strip() for cell in row.cells]
+                                data.append(dict(zip(keys, values)))
+                    if not data:
+                        slide_text = []
+                        for shape in slide.shapes:
+                            if hasattr(shape, "text") and shape.text:
+                                slide_text.append(shape.text.strip())
+                        data.append({'slide_no': idx, 'title': title, 'content': '\n'.join(slide_text)})
+                if not columns:
+                    columns = ['slide_no', 'title', 'content']
+            else:
+                data = []
+                columns = []
+        # --- ODT ---
+        elif ext == '.odt':
+            try:
+                from odf.opendocument import load
+                from odf.table import Table, TableRow, TableCell
+                from odf.text import P
+                doc = load(filepath)
+                data = []
+                columns = []
+                tables = doc.getElementsByType(Table)
+                for table in tables:
+                    table_rows = table.getElementsByType(TableRow)
+                    if not table_rows:
+                        continue
+                    header_cells = table_rows[0].getElementsByType(TableCell)
+                    keys = []
+                    for cell in header_cells:
+                        text = "".join([str(t) for t in cell.getElementsByType(P)])
+                        keys.append(text.strip())
+                    columns = keys
+                    for row in table_rows[1:]:
+                        vals = []
+                        for cell in row.getElementsByType(TableCell):
+                            text = "".join([str(t) for t in cell.getElementsByType(P)])
+                            vals.append(text.strip())
+                        data.append(dict(zip(keys, vals)))
+                if not data:
+                    from odf.text import Paragraph
+                    paragraphs = doc.getElementsByType(Paragraph)
+                    for idx, para in enumerate(paragraphs):
+                        t = str(para)
+                        if t:
+                            data.append({'para_no': idx, 'text': t})
+                    columns = ['para_no', 'text']
+            except Exception as e:
+                data = []
+                columns = []
+        else:
+            data = []
+            columns = []
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] read_any_table failed: {filepath}: {e}")
+        data = []
+        columns = []
+    return data, columns, table_name
+
+def extract_table_from_image(filepath):
+    # Dummy implementation — replace with actual OCR/table extraction logic
+    return [], [], os.path.splitext(os.path.basename(filepath))[0]
+
+def extract_table_camelot_pdf(filepath):
+    # Dummy implementation — replace with actual camelot logic if installed
+    return [], [], os.path.splitext(os.path.basename(filepath))[0]
+
+@lru_cache(maxsize=16)
+def get_all_files(data_folder):
+    try:
+        return tuple(
+            os.path.join(data_folder, fname)
+            for fname in os.listdir(data_folder)
+            if not fname.lower().endswith('.csv') and not fname.lower().endswith('.json')
+            and fname.lower().endswith(('.xls', '.xlsx', '.parquet', '.parquet.gz', '.pdf', '.docx', '.pptx', '.odt', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'))
+        )
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] get_all_files: {e}")
+        return tuple()
+
+def smart_parallel_read(files):
+    if joblib and len(files) > 1:
+        def _read(f):
+            return read_any_table(f)
+        results = joblib.Parallel(n_jobs=-1)(
+            joblib.delayed(_read)(f) for f in files
+        )
+        return results
+    else:
+        return [read_any_table(f) for f in files]
+
+def smart_dask_load(files):
+    if dask and len(files) > 3:
+        parquet_files = [f for f in files if f.endswith('.parquet') or f.endswith('.parquet.gz')]
+        if parquet_files:
+            df = dask.read_parquet(parquet_files)
+        else:
+            return []
+        merged = df.compute()
+        columns = list(merged.columns)
+        data = merged.fillna('').to_dict(orient='records')
+        table_name = "dask_merged"
+        return [(data, columns, table_name)]
+    return []
+
+def smart_load_all_tables(data_folder, only_processed=True, pm=None):
+    """
+    Loader hybrid untuk semua file (CSV/JSON dan non-CSV/JSON), mengembalikan format tabel flat list of dict.
+    Untuk file non-CSV/JSON, gunakan smart_file_preprocessing.py untuk integrasi preprocess-to-table.
+    Jika terjadi error pada salah satu proses (misal loader native gagal), otomatis fallback ke preprocessing (hybrid).
+    """
+    tables = {}
+
+    # --- CSV/JSON ---
+    try:
+        csv_json_tables = load_all_csv_json_tables(data_folder)
+        for k, v in csv_json_tables.items():
+            tables[k] = v
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] smart_load_all_tables csv/json loader failed: {e}")
+
+    # --- Non-CSV/JSON (other files) via native loader ---
+    error_in_native = False
+    try:
+        files = list(get_all_files(data_folder))
+        results = smart_parallel_read(files)
+        for data, columns, table_name in results:
+            if data and columns:
+                tables[table_name] = {'columns': columns, 'data': data}
+    except Exception as e:
+        error_in_native = True
+        print(f"[HYBRID-FALLBACK][ERROR] smart_load_all_tables native loader failed: {e}")
+
+    # --- Hybrid Fallback: gunakan preprocessing jika loader native gagal atau data kosong ---
+    from smart_file_preprocessing import preprocess_all_files, preprocess_to_flat_table
+    try:
+        preproc_result = preprocess_all_files(data_folder)
+        flat_tables = preprocess_to_flat_table(preproc_result)
+        for fname, v in flat_tables.items():
+            # PATCH: tambahkan slicing only_processed jika pm disediakan
+            if only_processed and pm is not None:
+                file_prog = pm.get_file_progress(fname)
+                processed = file_prog.get('processed', 0) if file_prog else None
+                if processed is not None and processed > 0:
+                    v['data'] = v['data'][:processed]
+                elif processed is not None and processed == 0:
+                    v['data'] = []
+            # PATCH: Overwrite only if native loader failed OR data empty
+            if fname not in tables or not tables[fname]['data']:
+                tables[fname] = v
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] smart_load_all_tables hybrid fallback failed: {e}")
+
+    return tables
+
+def get_first_data_file_path(data_folder, table_name=None):
+    PRIORITY_EXTS = [
+        '.parquet.gz', '.parquet', '.xlsx', '.xls',
+        '.pdf', '.docx', '.pptx', '.odt', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'
+    ]
+    try:
+        files = [f for f in os.listdir(data_folder) if not f.lower().endswith('.csv') and not f.lower().endswith('.json')
+                 and any(f.lower().endswith(ext) for ext in PRIORITY_EXTS)]
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] get_first_data_file_path: {e}")
+        return None, None, None
+    if table_name:
+        for ext in PRIORITY_EXTS:
+            fname = table_name + ext
+            fpath = os.path.join(data_folder, fname)
+            if os.path.exists(fpath):
+                return fpath, fname, get_media_type(fname)
+    for ext in PRIORITY_EXTS:
+        for f in files:
+            if f.lower().endswith(ext):
+                fpath = os.path.join(data_folder, f)
+                return fpath, f, get_media_type(f)
+    return None, None, None
+
+def get_media_type(fname):
+    fname = fname.lower()
+    if fname.endswith('.csv'):
+        return "text/csv"
+    elif fname.endswith('.json'):
+        return "application/json"
+    elif fname.endswith('.parquet.gz'):
+        return "application/gzip"
+    elif fname.endswith('.parquet'):
+        return "application/octet-stream"
+    elif fname.endswith('.xlsx'):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif fname.endswith('.xls'):
+        return "application/vnd.ms-excel"
+    elif fname.endswith('.pdf'):
+        return "application/pdf"
+    elif fname.endswith('.docx'):
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif fname.endswith('.pptx'):
+        return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif fname.endswith('.odt'):
+        return "application/vnd.oasis.opendocument.text"
+    elif fname.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')):
+        return "image/" + fname.split('.')[-1]
+    else:
+        return "application/octet-stream"
+
+# Optional: class-style interface, for extensibility in orchestrator
+class SmartFileLoader:
+    def __init__(self, data_folder=DATA_FOLDER, pm=None):
+        self.data_folder = data_folder
+        self.pm = pm
+
+    @staticmethod
+    def supported_formats():
+        return [
+            ".csv", ".json", ".xls", ".xlsx", ".parquet", ".parquet.gz",
+            ".pdf", ".docx", ".pptx", ".odt", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"
+        ]
+
+    def load_all_csv_json_tables(self):
+        return load_all_csv_json_tables(self.data_folder)
+
+    def smart_load_all_tables(self, only_processed=True):
+        # hybrid loader with fallback
+        return smart_load_all_tables(self.data_folder, only_processed=only_processed, pm=self.pm)
+
+    def get_first_csv_json_file_path(self, table_name=None):
+        return get_first_csv_json_file_path(self.data_folder, table_name)
+
+    def get_first_data_file_path(self, table_name=None):
+        return get_first_data_file_path(self.data_folder, table_name)
+
+    def calc_sha256_from_obj(self, obj):
+        return calc_sha256_from_obj(obj)
+
+    def get_media_type(self, fname):
+        return get_media_type(fname)
+
+13. smart_file_scanner.py
+
+import os
+import hashlib
+import time
+from progress_manager import ProgressManager
+
+SUPPORTED_EXTS = [
+    '.csv', '.json', '.xls', '.xlsx', '.parquet', '.parquet.gz', '.pdf', '.docx',
+    '.pptx', '.odt', '.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'
+]
+
+def calc_sha256_from_file(path, block_size=65536):
+    """Hitung SHA256 file, efisien untuk file besar."""
+    sha256 = hashlib.sha256()
+    try:
+        print(f"[DEBUG] calc_sha256_from_file: {path}")
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(block_size), b""):
+                sha256.update(chunk)
+        sha = sha256.hexdigest()
+        print(f"[DEBUG] calc_sha256_from_file: {path} sha256={sha}")
+        return sha
+    except Exception as e:
+        print(f"[smart_file_scanner][ERROR] calc_sha256_from_file failed for {path}: {e}")
+        # Hybrid fallback: return empty string (warn but allow continue)
+        return ""
+
+def scan_data_folder(data_dir, exts=SUPPORTED_EXTS, include_hidden=False, pm=None, only_incomplete=False):
+    """
+    Scan folder data, deteksi semua file data valid dan formatnya.
+    Return: list of dict:
+        [{
+            'name': 'namafile.csv',
+            'path': '/full/path/namafile.csv',
+            'ext': '.csv',
+            'size_bytes': 12345,
+            'modified_time': 1685420000.123,  # epoch
+            'sha256': '...',
+            'progress': {...},      # [PATCH] Tambahan: info progres jika ada (jika pm terhubung)
+            'percent_processed': .. # [PATCH] Tambahan: metrik persentase progress jika ada
+        }, ...]
+    Sinkronisasi file: hanya proses file yang ada di folder data dan sesuai ekstensi yang didukung.
+    Jika only_incomplete=True dan pm diberikan, hanya return file dengan progress belum selesai.
+    """
+    print(f"[DEBUG] scan_data_folder: data_dir={data_dir}, exts={exts}, include_hidden={include_hidden}")
+    files = []
+    try:
+        files_on_disk = [
+            fname for fname in os.listdir(data_dir)
+            if os.path.isfile(os.path.join(data_dir, fname))
+        ]
+    except Exception as e:
+        print(f"[smart_file_scanner][HYBRID-FALLBACK][ERROR] Failed to listdir {data_dir}: {e}")
+        return []
+    for fname in files_on_disk:
+        if not include_hidden and fname.startswith('.'):
+            print(f"[DEBUG] scan_data_folder: skip hidden {fname}")
+            continue
+        ext = os.path.splitext(fname)[-1].lower()
+        if ext not in exts:
+            print(f"[DEBUG] scan_data_folder: skip ext {fname} ({ext})")
+            continue
+        fpath = os.path.join(data_dir, fname)
+        try:
+            size_bytes = os.path.getsize(fpath)
+            modified_time = os.path.getmtime(fpath)
+            sha256 = calc_sha256_from_file(fpath)
+            fileinfo = {
+                'name': fname,
+                'path': fpath,
+                'ext': ext,
+                'size_bytes': size_bytes,
+                'modified_time': modified_time,
+                'sha256': sha256
+            }
+            # PATCH: Tambahkan info progres dan persen processed jika pm diberikan
+            progress = None
+            percent_processed = None
+            if pm is not None and hasattr(pm, "get_file_progress"):
+                progress = pm.get_file_progress(fname)
+                if progress:
+                    fileinfo['progress'] = progress
+                    processed = progress.get('processed', 0)
+                    total = progress.get('total', None)
+                    if total and total > 0:
+                        percent_processed = round((processed / total) * 100, 2)
+                        fileinfo['percent_processed'] = percent_processed
+                    else:
+                        fileinfo['percent_processed'] = None
+            files.append(fileinfo)
+            print(f"[DEBUG] scan_data_folder: found {fileinfo}")
+        except Exception as e:
+            print(f"[smart_file_scanner][HYBRID-FALLBACK][ERROR] Failed scan {fname}: {e}")
+            # Hybrid fallback: continue, don't append
+    # PATCH: filter only_incomplete jika diinginkan (dan pm ada)
+    if only_incomplete and pm is not None:
+        before_filter = len(files)
+        files = [
+            f for f in files
+            if f.get("progress") and f["progress"].get("processed", 0) < f["progress"].get("total", 0)
+        ]
+        print(f"[DEBUG] scan_data_folder: only_incomplete filter: {before_filter} -> {len(files)} files")
+    print(f"[DEBUG] scan_data_folder: total files found: {len(files)}")
+    return files
+
+def detect_new_and_changed_files(data_dir, prev_snapshot, pm=None, only_incomplete=False):
+    """
+    Bandingkan snapshot scan terbaru dengan snapshot sebelumnya (list of dict).
+    Return: (list_new, list_changed, list_deleted)
+    PATCH: mendukung parameter pm & only_incomplete untuk filter file-file active/incomplete.
+    """
+    print(f"[DEBUG] detect_new_and_changed_files: data_dir={data_dir}")
+    try:
+        curr_files = scan_data_folder(data_dir, pm=pm, only_incomplete=only_incomplete)
+    except Exception as e:
+        print(f"[smart_file_scanner][HYBRID-FALLBACK][ERROR] scan_data_folder error in detect_new_and_changed_files: {e}")
+        curr_files = []
+    prev_map = {f['name']: f for f in prev_snapshot}
+    curr_map = {f['name']: f for f in curr_files}
+
+    new_files = [f for f in curr_files if f['name'] not in prev_map]
+    changed_files = [
+        f for f in curr_files
+        if f['name'] in prev_map and (
+            f['sha256'] != prev_map[f['name']]['sha256'] or
+            f['modified_time'] != prev_map[f['name']]['modified_time']
+        )
+    ]
+    deleted_files = [f for f in prev_snapshot if f['name'] not in curr_map]
+
+    print(f"[DEBUG] detect_new_and_changed_files: new_files={len(new_files)}, changed_files={len(changed_files)}, deleted_files={len(deleted_files)}")
+    return new_files, changed_files, deleted_files
+
+def snapshot_to_dict(snapshot):
+    """Convert snapshot list to dict {name: fileinfo}."""
+    try:
+        d = {f['name']: f for f in snapshot}
+        print(f"[DEBUG] snapshot_to_dict: keys={list(d.keys())}")
+        return d
+    except Exception as e:
+        print(f"[smart_file_scanner][HYBRID-FALLBACK][ERROR] snapshot_to_dict failed: {e}")
+        return {}
+
+def scan_file(data_dir, file_name):
+    pm = ProgressManager(data_dir)
+    with pm.lock:
+        print(f"[SmartFileScanner] Scanning {file_name} with locking")
+        # Scan file and optionally update progress if necessary
+        fpath = os.path.join(data_dir, file_name)
+        if not os.path.isfile(fpath):
+            print(f"[SmartFileScanner][ERROR] {file_name} not found in {data_dir}")
+            return None
+        size_bytes = os.path.getsize(fpath)
+        modified_time = os.path.getmtime(fpath)
+        sha256 = calc_sha256_from_file(fpath)
+        result = {
+            'name': file_name,
+            'path': fpath,
+            'ext': os.path.splitext(file_name)[-1].lower(),
+            'size_bytes': size_bytes,
+            'modified_time': modified_time,
+            'sha256': sha256
+        }
+        progress = pm.get_file_progress(file_name)
+        if progress:
+            result['progress'] = progress
+            processed = progress.get('processed', 0)
+            total = progress.get('total', None)
+            if total and total > 0:
+                result['percent_processed'] = round((processed / total) * 100, 2)
+            else:
+                result['percent_processed'] = None
+        print(f"[SmartFileScanner] scan_file result: {result}")
+        return result
+
+if __name__ == "__main__":
+    # Contoh penggunaan
+    DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    try:
+        scan = scan_data_folder(DATA_DIR)
+        print("[smart_file_scanner] Files scanned:")
+        for info in scan:
+            print(info)
+    except Exception as e:
+        print(f"[smart_file_scanner][HYBRID-FALLBACK][ERROR] main scan failed: {e}")
+
+14. smart_file_preprocessing.py
+
+import os
+from typing import List, Dict
+from progress_manager import ProgressManager
+
+def extract_raw_lines(filepath: str) -> List[str]:
+    ext = os.path.splitext(filepath)[-1].lower()
+    lines = []
+    print(f"[DEBUG] extract_raw_lines: processing {filepath} (ext={ext})")
+    try:
+        if ext == ".pdf":
+            try:
+                import pdfplumber
+                print(f"[DEBUG] extract_raw_lines: using pdfplumber for {filepath}")
+                with pdfplumber.open(filepath) as pdf:
+                    for page in pdf.pages:
+                        t = page.extract_text()
+                        if t: lines.extend(t.split('\n'))
+            except Exception as e:
+                print(f"[HYBRID-FALLBACK][ERROR] pdfplumber failed for {filepath}: {e}")
+                try:
+                    with open(filepath, "rb") as f:
+                        raw = f.read().decode('utf-8', errors='ignore')
+                        lines = raw.split('\n')
+                except Exception as e2:
+                    print(f"[HYBRID-FALLBACK][ERROR] PDF fallback open failed for {filepath}: {e2}")
+                    lines = []
+        elif ext == ".docx":
+            try:
+                from docx import Document
+                print(f"[DEBUG] extract_raw_lines: using python-docx for {filepath}")
+                doc = Document(filepath)
+                lines = [p.text for p in doc.paragraphs if p.text.strip()]
+            except Exception as e:
+                print(f"[HYBRID-FALLBACK][ERROR] python-docx failed for {filepath}: {e}")
+                try:
+                    with open(filepath, encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                except Exception as e2:
+                    print(f"[HYBRID-FALLBACK][ERROR] DOCX fallback open failed for {filepath}: {e2}")
+                    lines = []
+        elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
+            try:
+                from PIL import Image
+                import pytesseract
+                print(f"[DEBUG] extract_raw_lines: using pytesseract for {filepath}")
+                t = pytesseract.image_to_string(Image.open(filepath))
+                lines = t.split('\n')
+            except Exception as e:
+                print(f"[HYBRID-FALLBACK][ERROR] pytesseract failed for {filepath}: {e}")
+                lines = []
+        else:
+            print(f"[DEBUG] extract_raw_lines: using open for {filepath}")
+            try:
+                with open(filepath, encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                print(f"[HYBRID-FALLBACK][ERROR] open failed for {filepath}: {e}")
+                lines = []
+        clean_lines = [l.strip() for l in lines if l and l.strip()]
+        print(f"[DEBUG] extract_raw_lines: extracted {len(clean_lines)} lines from {filepath}")
+        return clean_lines
+    except Exception as e:
+        print(f"[HYBRID-FALLBACK][ERROR] Failed to preprocess {filepath}: {e}")
+        return []
+
+def preprocess_all_files(data_folder: str) -> Dict[str, Dict]:
+    """
+    Returns a dict: {filename: {"raw_lines": [...], "extension": ext}}
+    Only processes non-CSV/JSON files.
+    Sinkronisasi/pre-filter file: hanya proses file yang ada di folder dan bukan CSV/JSON.
+    """
+    print(f"[DEBUG] preprocess_all_files: processing folder {data_folder}")
+    data = {}
+    pm = ProgressManager(data_folder)
+    with pm.lock:
+        try:
+            files_on_disk = [
+                fname for fname in os.listdir(data_folder)
+                if os.path.isfile(os.path.join(data_folder, fname))
+            ]
+        except Exception as e:
+            print(f"[HYBRID-FALLBACK][ERROR] preprocess_all_files listdir failed: {e}")
+            files_on_disk = []
+        for fname in files_on_disk:
+            ext = os.path.splitext(fname)[-1].lower()
+            if ext in [".csv", ".json"]:
+                print(f"[DEBUG] preprocess_all_files: skipping {fname} (CSV/JSON)")
+                continue
+            fpath = os.path.join(data_folder, fname)
+            print(f"[DEBUG] preprocess_all_files: extracting lines from {fname}")
+            raw_lines = extract_raw_lines(fpath)
+            data[fname] = {
+                "raw_lines": raw_lines,
+                "extension": ext
+            }
+            print(f"[DEBUG] preprocess_all_files: {fname} -> {len(raw_lines)} lines, ext={ext}")
+        print(f"[DEBUG] preprocess_all_files: processed {len(data)} files")
+    return data
+
+def preprocess_table(data_dir, table_name):
+    pm = ProgressManager(data_dir)
+    with pm.lock:
+        print(f"[SmartFilePreprocessing] Preprocessing {table_name} with locking")
+        fpath = os.path.join(data_dir, table_name)
+        ext = os.path.splitext(table_name)[-1].lower()
+        if ext in [".csv", ".json"]:
+            print(f"[SmartFilePreprocessing] Skipping {table_name} (CSV/JSON)")
+            return {}
+        lines = extract_raw_lines(fpath)
+        return {"raw_lines": lines, "extension": ext}
+
+def preprocess_to_flat_table(pre_file_result: Dict[str, Dict]) -> Dict[str, Dict]:
+    print("[DEBUG] preprocess_to_flat_table called")
+    result = {}
+    for fname, item in pre_file_result.items():
+        lines = item.get("raw_lines", [])
+        ext = item.get("extension", "")
+        columns = ["text"]
+        data = [{"text": l} for l in lines]
+        result[fname] = {
+            "columns": columns,
+            "data": data
+        }
+        print(f"[DEBUG] preprocess_to_flat_table: {fname} -> {len(data)} rows, columns={columns}")
+    print(f"[DEBUG] preprocess_to_flat_table: processed {len(result)} files")
+    return result
+
+15. utils_gdrive.py
+
+import os
+import io
+import json
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2 import service_account
+import pandas as pd  # Opsional, untuk auto clean CSV
+
+# Link folder sesuai instruksi
+CSVJSON_SOURCE = "https://drive.google.com/drive/folders/1nDveh8erKuSFTghCHhlPEEZmu9SUo8jB"
+NON_CSVJSON_SOURCE = "https://drive.google.com/drive/folders/1Yx_Zeil9xoFPxS6-QZTBpwnhmaE2pSzu"
+
+def get_gdrive_file_list(folder_id, service_account_json_path):
+    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            service_account_json_path, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
+        query = f"'{folder_id}' in parents and trashed = false"
+        page_token = None
+        meta_files = []
+        print(f"[DEBUG] get_gdrive_file_list: folder_id={folder_id}, service_account_json_path={service_account_json_path}")
+        while True:
+            try:
+                response = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime)',
+                    pageToken=page_token
+                ).execute()
+            except Exception as e:
+                print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to list files: {e}")
+                break
+            files = response.get('files', [])
+            for f in files:
+                meta_files.append({
+                    'id': f['id'],
+                    'name': f['name'],
+                    'md5Checksum': f.get('md5Checksum', None),
+                    'modifiedTime': f.get('modifiedTime', None),
+                    'mimeType': f.get('mimeType', None),
+                })
+            page_token = response.get('nextPageToken', None)
+            if not page_token:
+                break
+        print(f"[GDRIVE LIST] FOLDER {folder_id} TOTAL: {len(meta_files)} FILES")
+        for file in meta_files:
+            print(f" - {file['name']} ({file['id']})")
+        return meta_files
+    except Exception as e:
+        print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to connect to Google Drive: {e}")
+        return []
+
+def data_source_from_name(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in [".csv", ".json"]:
+        return CSVJSON_SOURCE
+    return NON_CSVJSON_SOURCE
+
+def download_all_from_gdrive_folder(folder_id, data_dir, service_account_json_path, meta_prefix="csvjson"):
+    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            service_account_json_path, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to authenticate or build service: {e}")
+        return []
+    os.makedirs(data_dir, exist_ok=True)
+    meta_files = get_gdrive_file_list(folder_id, service_account_json_path)
+    meta_path = os.path.join(data_dir, f"{meta_prefix}_gdrive_meta.json")
+    meta_files_written = []
+
+    for f in meta_files:
+        file_id = f['id']
+        orig_name = f['name']
+        dest_path = os.path.join(data_dir, orig_name)
+        try:
+            print(f"[GDRIVE DOWNLOAD] Downloading {orig_name}")
+            request = service.files().get_media(fileId=file_id)
+            with io.FileIO(dest_path, 'wb') as fh:
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+            print(f"[GDRIVE DOWNLOAD] Done: {orig_name}")
+
+            # Opsional: auto bersihkan duplikasi baris CSV
+            if dest_path.lower().endswith('.csv'):
+                try:
+                    df = pd.read_csv(dest_path)
+                    before = len(df)
+                    df = df.drop_duplicates()
+                    after = len(df)
+                    if after < before:
+                        df.to_csv(dest_path, index=False)
+                        print(f"[PANDAS CLEAN] Removed duplicates from {orig_name}: {before-after} rows dropped")
+                except Exception as e:
+                    print(f"[PANDAS ERROR][HYBRID-FALLBACK] Cannot process {orig_name} as CSV: {e}")
+
+            meta_entry = {
+                "id": file_id,
+                "original_name": orig_name,
+                "saved_name": orig_name,
+                "md5Checksum": f.get('md5Checksum', None),
+                "modifiedTime": f.get('modifiedTime', None),
+                "mimeType": f.get('mimeType', None),
+                "data_source": data_source_from_name(orig_name),
+            }
+
+            meta_files_written.append(meta_entry)
+        except Exception as e:
+            print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to download {orig_name} ({file_id}): {e}")
+            continue
+
+    try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_files_written, f, indent=2)
+        print(f"[GDRIVE META] Saved meta: {meta_path} ({len(meta_files_written)} files)")
+    except Exception as e:
+        print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to write meta file: {e}")
+    return [os.path.join(data_dir, f['saved_name']) for f in meta_files_written]
+
+# REVISI: Hilangkan auto download saat import/module load/server start. 
+# Pindahkan pemanggilan ensure_gdrive_data ke workflow n8n/trigger eksternal saja.
+# Fungsi ensure_gdrive_data TETAP ADA, tapi hanya dipanggil manual (tidak otomatis di file ini).
+
+def ensure_gdrive_data(folder_id, data_dir, service_account_json_path, meta_prefix="csvjson"):
+    print(f"[DEBUG] ensure_gdrive_data: folder_id={folder_id}, data_dir={data_dir}, meta_prefix={meta_prefix}")
+    meta_path = os.path.join(data_dir, f"{meta_prefix}_gdrive_meta.json")
+    try:
+        remote_files = get_gdrive_file_list(folder_id, service_account_json_path)
+    except Exception as e:
+        print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to get remote file list: {e}")
+        remote_files = []
+    need_download = True
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                old_meta = json.load(f)
+            # Change all "data_file" to "data_source" in old_meta (future proofing)
+            for meta in old_meta:
+                if "data_file" in meta:
+                    meta["data_source"] = meta.pop("data_file")
+                # Revisi: pastikan data_source sesuai aturan terbaru
+                if "original_name" in meta:
+                    meta["data_source"] = data_source_from_name(meta["original_name"])
+            old_names = set(f["saved_name"] for f in old_meta)
+            remote_names = set(f["name"] for f in remote_files)
+            local_files_exist = all(
+                os.path.exists(os.path.join(data_dir, f["saved_name"])) for f in old_meta
+            )
+            print(f"[DEBUG] ensure_gdrive_data: old_names={old_names}, remote_names={remote_names}")
+            print(f"[DEBUG] ensure_gdrive_data: local_files_exist={local_files_exist}")
+            if old_names == remote_names and len(old_meta) == len(remote_files) and local_files_exist:
+                print(f"[GDRIVE] Skipping download for {meta_prefix}, files up-to-date.")
+                need_download = False
+            else:
+                print(f"[GDRIVE] Redownload triggered for {meta_prefix}: meta mismatch or some files missing!")
+        except Exception as e:
+            print(f"[GDRIVE ERROR][HYBRID-FALLBACK] Failed to open/check meta file: {e}")
+    if need_download:
+        print(f"[GDRIVE] Downloading all files for {meta_prefix} (force update or file count changed, or local file missing)...")
+        download_all_from_gdrive_folder(folder_id, data_dir, service_account_json_path, meta_prefix=meta_prefix)
+    else:
+        print(f"[GDRIVE] All files for {meta_prefix} are up-to-date.")
+
+# Tidak ada kode auto-download/ensure_gdrive_data yang dipanggil otomatis di sini.
+# Panggil ensure_gdrive_data() hanya dari workflow n8n/trigger sesuai kebutuhan.
+
+16. csvjson_gdrive_meta.json
+
+[]
+
+17. file_progress.json
+
+{}
+
+18. other_gdrive_meta.json
+
+[]
+
+
