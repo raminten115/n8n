@@ -1,0 +1,2648 @@
+{
+  "name": "Synatra (Autonomous Business Process) copy",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// ETL Kombinasi Advanced Multi-Join: Data Master KPI 6 Divisi (Finance, Sales/Marketing, HR, Operation, Project, Strategic)\n// Output siap untuk data warehouse, dashboard, & analitik lintas divisi (presisi, akurat, minim null, multirow, multi-join, flag impute).\n\n// === Helper Functions ===\nconst cleanString = str => (typeof str === 'string' ? str.trim().replace(/\\s+/g, ' ') : str);\nconst toNumber = val => (val === undefined || val === null || val === '' ? null : Number(val));\nconst toDate = val => {\n  if (!val || val === '') return null;\n  const d = new Date(val);\n  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);\n};\nconst isValidNumber = v => typeof v === 'number' && !isNaN(v);\nconst mean = arr => arr.length ? arr.reduce((a,b) => a + b, 0) / arr.length : null;\nconst sum = arr => arr.length ? arr.reduce((a,b) => a + b, 0) : null;\nconst median = arr => {\n  if (!arr.length) return null;\n  const s = arr.slice().sort((a,b) => a-b);\n  const mid = Math.floor(s.length/2);\n  return s.length % 2 === 0 ? (s[mid-1]+s[mid])/2 : s[mid];\n};\nconst mode = arr => {\n  if (!arr.length) return null;\n  const freq = {};\n  arr.forEach(v => { freq[v] = (freq[v]||0)+1; });\n  let max = 0, res = arr[0];\n  Object.entries(freq).forEach(([v, cnt]) => { if (cnt>max) { max=cnt; res=Number(v);} });\n  return res;\n};\nconst firstNonNull = (...vals) => vals.find(v => v !== null && v !== undefined);\n\nfunction safeMean(arr) {\n  const vals = arr.filter(isValidNumber);\n  return vals.length ? mean(vals) : null;\n}\nfunction safeSum(arr) {\n  const vals = arr.filter(isValidNumber);\n  return vals.length ? sum(vals) : null;\n}\n\n// === 1. Split data per divisi ===\nconst hr = [], finance = [], salesMarketing = [], operation = [], project = [], strategic = [];\nfor (const itm of items) {\n  const row = itm.json;\n  if ('employee_id' in row && row.employee_id) hr.push(row);\n  else if ('fiscal_year' in row && row.fiscal_year) finance.push(row);\n  else if ('sales_target' in row && row.sales_target) salesMarketing.push(row);\n  else if ('operational_cost' in row && row.operational_cost) operation.push(row);\n  else if ('project_id' in row && row.project_id) project.push(row);\n  else if ('strategy_id' in row && row.strategy_id) strategic.push(row);\n}\n\n// === 2. Build unique key combinations (department, region, store_id, month/budget_month/fiscal_year) ===\nfunction getKey(row) {\n  const dep = cleanString(row.department || row.department_name || \"\");\n  const reg = cleanString(row.region || \"\");\n  const store = cleanString(row.store_id || \"\");\n  let month = null;\n  if ('budget_month' in row && row.budget_month != null) month = toNumber(row.budget_month);\n  else if ('month' in row && row.month != null) month = toNumber(row.month);\n  else if ('fiscal_year' in row && row.fiscal_year) month = 1;\n  else month = 1;\n  return `${dep}|${reg}|${store}|${month}`;\n}\nconst allKeys = [\n  ...hr.map(getKey),\n  ...finance.map(getKey),\n  ...salesMarketing.map(getKey),\n  ...operation.map(getKey),\n  ...project.map(getKey),\n  ...strategic.map(getKey)\n];\nconst keySet = new Set(allKeys);\n\n// === 3. Multi-index data by key ===\nfunction buildMultiIndex(arr) {\n  const idx = {};\n  arr.forEach(row => {\n    const key = getKey(row);\n    if (!idx[key]) idx[key] = [];\n    idx[key].push(row);\n  });\n  return idx;\n}\nconst hrIdx = buildMultiIndex(hr);\nconst financeIdx = buildMultiIndex(finance);\nconst salesIdx = buildMultiIndex(salesMarketing);\nconst opIdx = buildMultiIndex(operation);\nconst projIdx = buildMultiIndex(project);\nconst stratIdx = buildMultiIndex(strategic);\n\n// === 4. Fallback global/statistik for imputation ===\nfunction buildFallbackStat(arr, field) {\n  const nums = arr.map(r => toNumber(r[field])).filter(isValidNumber);\n  return { mean: mean(nums), median: median(nums), mode: mode(nums) };\n}\nconst fallbackStats = {\n  hr: {\n    absent_days: buildFallbackStat(hr, 'absent_days'),\n    training_hours: buildFallbackStat(hr, 'training_hours'),\n    ess_score: buildFallbackStat(hr, 'ess_score'),\n    salary: buildFallbackStat(hr, 'salary'),\n    market_salary: buildFallbackStat(hr, 'market_salary'),\n    compensation_ratio: buildFallbackStat(hr, 'compensation_ratio'),\n    age: buildFallbackStat(hr, 'age'),\n  },\n  finance: {\n    budget_allocated: buildFallbackStat(finance, 'budget_allocated'),\n    actual_spending: buildFallbackStat(finance, 'actual_spending'),\n    total_revenue: buildFallbackStat(finance, 'total_revenue'),\n    total_profit: buildFallbackStat(finance, 'total_profit'),\n    profit_margin: buildFallbackStat(finance, 'profit_margin'),\n    roi: buildFallbackStat(finance, 'roi'),\n    variable_costs: buildFallbackStat(finance, 'variable_costs'),\n    fixed_costs: buildFallbackStat(finance, 'fixed_costs'),\n    operating_cash_flow: buildFallbackStat(finance, 'operating_cash_flow'),\n    net_profit: buildFallbackStat(finance, 'net_profit')\n  },\n  sales: {\n    sales_target: buildFallbackStat(salesMarketing, 'sales_target'),\n    actual_sales: buildFallbackStat(salesMarketing, 'actual_sales'),\n    avg_transaction_value: buildFallbackStat(salesMarketing, 'avg_transaction_value'),\n    customer_retention_rate: buildFallbackStat(salesMarketing, 'customer_retention_rate'),\n    conversion_rate: buildFallbackStat(salesMarketing, 'conversion_rate'),\n    units_sold: buildFallbackStat(salesMarketing, 'units_sold')\n  },\n  op: {\n    operational_cost: buildFallbackStat(operation, 'operational_cost'),\n    maintenance_cost: buildFallbackStat(operation, 'maintenance_cost'),\n    avg_delivery_time: buildFallbackStat(operation, 'avg_delivery_time'),\n    asset_utilization: buildFallbackStat(operation, 'asset_utilization'),\n    uptime_percentage: buildFallbackStat(operation, 'uptime_percentage'),\n    average_inventory: buildFallbackStat(operation, 'average_inventory'),\n    order_fulfillment_rate: buildFallbackStat(operation, 'order_fulfillment_rate')\n  }\n};\nfunction fallbackValue(arr, field, fallbackStat) {\n  const nums = arr.map(r => toNumber(r[field])).filter(isValidNumber);\n  if (nums.length) return mean(nums);\n  if (fallbackStat && isValidNumber(fallbackStat.mean)) return fallbackStat.mean;\n  return null;\n}\n\n// === Field aggregation type mapping ===\nconst sumFields = [\n  // Sales/Marketing\n  'units_sold','transaction_count','campaign_count','leads_generated','new_customers','impressions','clicks',\n  // Operation\n  'items_received','items_shipped','items_damaged','order_volume','employee_count_on_shift','labor_hours','energy_consumption','maintenance_ticket_count','customer_return_count','backorder_count',\n];\nfunction aggrDiv(arr, field, fallbackStat, aggrFn) {\n  let vals = arr.map(r => toNumber(r[field])).filter(isValidNumber);\n  if (!aggrFn) aggrFn = sumFields.includes(field) ? sum : mean;\n  if (vals.length) return aggrFn(vals);\n  if (fallbackStat && isValidNumber(fallbackStat.mean)) return fallbackStat.mean;\n  return null;\n}\n\n// === 5. Advanced Multi-Join, Aggregation, and Enrichment ===\nconst output = [];\nfor (const key of keySet) {\n  const [dep, reg, store, month] = key.split('|');\n  const hrRows = hrIdx[key] || [], financeRows = financeIdx[key] || [], salesRows = salesIdx[key] || [],\n        opRows = opIdx[key] || [], projRows = projIdx[key] || [], stratRows = stratIdx[key] || [];\n  const maxRows = Math.max(hrRows.length, projRows.length, stratRows.length, 1);\n  const entityList = hrRows.length ? hrRows : Array.from({length: maxRows}, (_,i) => ({}));\n\n  for (let i = 0; i < entityList.length; i++) {\n    const row = entityList[i];\n    const isImputed = {};\n    function aggrHR(field) {\n      const val = toNumber(row[field]);\n      if (isValidNumber(val)) return val;\n      const vals = hrRows.map(r => toNumber(r[field])).filter(isValidNumber);\n      if (vals.length) { isImputed[field] = true; return mean(vals); }\n      if (fallbackStats.hr[field] && isValidNumber(fallbackStats.hr[field].mean)) { isImputed[field] = true; return fallbackStats.hr[field].mean; }\n      isImputed[field] = true;\n      return null;\n    }\n    function aggrAvgInventory() {\n      if (opRows.length) {\n        let vals = opRows.map(op => toNumber(op.average_inventory)).filter(isValidNumber);\n        if (vals.length) return mean(vals);\n        let alt = opRows.map(op => {\n          const begin = toNumber(op.beginning_inventory);\n          const end = toNumber(op.ending_inventory);\n          return (isValidNumber(begin) && isValidNumber(end)) ? (begin + end) / 2 : null;\n        }).filter(isValidNumber);\n        if (alt.length) { isImputed.average_inventory = true; return mean(alt); }\n      }\n      isImputed.average_inventory = true;\n      return fallbackStats.op.average_inventory.mean;\n    }\n    let completeness = 0, totalFields = 0;\n    function fieldOrImputed(val, field, arr, fallbackStat) {\n      totalFields++;\n      if (val !== null && val !== undefined && !isNaN(val)) completeness++;\n      else if (arr && fallbackStat) isImputed[field] = true;\n      return val;\n    }\n\n    // === OUTPUT OBJECT, multi-join enrichment ===\n    const obj = {\n      id: row.employee_id\n        ? `${dep}_${reg}_${store}_${month}_${cleanString(row.employee_id)}`\n        : `${dep}_${reg}_${store}_${month}_${i}`,\n      department: dep, region: reg, store_id: store, month: toNumber(month),\n      // FINANCE\n      fiscal_year: fieldOrImputed(aggrDiv(financeRows, 'fiscal_year', {}), 'fiscal_year', financeRows, {}),\n      budget_month: fieldOrImputed(aggrDiv(financeRows, 'budget_month', {}), 'budget_month', financeRows, {}),\n      budget_allocated: fieldOrImputed(aggrDiv(financeRows, 'budget_allocated', fallbackStats.finance.budget_allocated), 'budget_allocated', financeRows, fallbackStats.finance.budget_allocated),\n      actual_spending: fieldOrImputed(aggrDiv(financeRows, 'actual_spending', fallbackStats.finance.actual_spending), 'actual_spending', financeRows, fallbackStats.finance.actual_spending),\n      forecast_budget: fieldOrImputed(aggrDiv(financeRows, 'forecast_budget', {}), 'forecast_budget', financeRows, {}),\n      forecast_spending: fieldOrImputed(aggrDiv(financeRows, 'forecast_spending', {}), 'forecast_spending', financeRows, {}),\n      forecast_revenue: fieldOrImputed(aggrDiv(financeRows, 'forecast_revenue', {}), 'forecast_revenue', financeRows, {}),\n      forecast_profit: fieldOrImputed(aggrDiv(financeRows, 'forecast_profit', {}), 'forecast_profit', financeRows, {}),\n      current_assets: fieldOrImputed(aggrDiv(financeRows, 'current_assets', {}), 'current_assets', financeRows, {}),\n      current_liabilities: fieldOrImputed(aggrDiv(financeRows, 'current_liabilities', {}), 'current_liabilities', financeRows, {}),\n      quick_assets: fieldOrImputed(aggrDiv(financeRows, 'quick_assets', {}), 'quick_assets', financeRows, {}),\n      inventory: fieldOrImputed(aggrDiv(financeRows, 'inventory', {}), 'inventory', financeRows, {}),\n      total_assets: fieldOrImputed(aggrDiv(financeRows, 'total_assets', {}), 'total_assets', financeRows, {}),\n      total_liabilities: fieldOrImputed(aggrDiv(financeRows, 'total_liabilities', {}), 'total_liabilities', financeRows, {}),\n      total_equity: fieldOrImputed(aggrDiv(financeRows, 'total_equity', {}), 'total_equity', financeRows, {}),\n      cash_and_cash_equivalents: fieldOrImputed(aggrDiv(financeRows, 'cash_and_cash_equivalents', {}), 'cash_and_cash_equivalents', financeRows, {}),\n      accounts_receivable: fieldOrImputed(aggrDiv(financeRows, 'accounts_receivable', {}), 'accounts_receivable', financeRows, {}),\n      accounts_payable: fieldOrImputed(aggrDiv(financeRows, 'accounts_payable', {}), 'accounts_payable', financeRows, {}),\n      short_term_debt: fieldOrImputed(aggrDiv(financeRows, 'short_term_debt', {}), 'short_term_debt', financeRows, {}),\n      long_term_debt: fieldOrImputed(aggrDiv(financeRows, 'long_term_debt', {}), 'long_term_debt', financeRows, {}),\n      total_revenue: fieldOrImputed(aggrDiv(financeRows, 'total_revenue', fallbackStats.finance.total_revenue), 'total_revenue', financeRows, fallbackStats.finance.total_revenue),\n      cost_of_goods_sold: fieldOrImputed(aggrDiv(financeRows, 'cost_of_goods_sold', {}), 'cost_of_goods_sold', financeRows, {}),\n      gross_profit: fieldOrImputed(aggrDiv(financeRows, 'gross_profit', {}), 'gross_profit', financeRows, {}),\n      operating_income: fieldOrImputed(aggrDiv(financeRows, 'operating_income', {}), 'operating_income', financeRows, {}),\n      operating_expenses: fieldOrImputed(aggrDiv(financeRows, 'operating_expenses', {}), 'operating_expenses', financeRows, {}),\n      net_profit: fieldOrImputed(aggrDiv(financeRows, 'net_profit', fallbackStats.finance.net_profit), 'net_profit', financeRows, fallbackStats.finance.net_profit),\n      ebit: fieldOrImputed(aggrDiv(financeRows, 'ebit', {}), 'ebit', financeRows, {}),\n      ebitda: fieldOrImputed(aggrDiv(financeRows, 'ebitda', {}), 'ebitda', financeRows, {}),\n      depreciation: fieldOrImputed(aggrDiv(financeRows, 'depreciation', {}), 'depreciation', financeRows, {}),\n      amortization: fieldOrImputed(aggrDiv(financeRows, 'amortization', {}), 'amortization', financeRows, {}),\n      interest_expense: fieldOrImputed(aggrDiv(financeRows, 'interest_expense', {}), 'interest_expense', financeRows, {}),\n      tax_expense: fieldOrImputed(aggrDiv(financeRows, 'tax_expense', {}), 'tax_expense', financeRows, {}),\n      operating_cash_flow: fieldOrImputed(aggrDiv(financeRows, 'operating_cash_flow', fallbackStats.finance.operating_cash_flow), 'operating_cash_flow', financeRows, fallbackStats.finance.operating_cash_flow),\n      investing_cash_flow: fieldOrImputed(aggrDiv(financeRows, 'investing_cash_flow', {}), 'investing_cash_flow', financeRows, {}),\n      financing_cash_flow: fieldOrImputed(aggrDiv(financeRows, 'financing_cash_flow', {}), 'financing_cash_flow', financeRows, {}),\n      capital_expenditure: fieldOrImputed(aggrDiv(financeRows, 'capital_expenditure', {}), 'capital_expenditure', financeRows, {}),\n\n      // HR\n      employee_id: cleanString(row.employee_id),\n      employee_name: cleanString(row.employee_name),\n      hire_date: toDate(row.hire_date),\n      termination_date: toDate(row.termination_date),\n      gender: cleanString(row.gender),\n      age: fieldOrImputed(aggrHR('age'), 'age', hrRows, fallbackStats.hr.age),\n      job_level: cleanString(row.job_level),\n      is_promoted: cleanString(row.is_promoted),\n      is_high_performer: cleanString(row.is_high_performer),\n      absent_days: fieldOrImputed(aggrHR('absent_days'), 'absent_days', hrRows, fallbackStats.hr.absent_days),\n      training_hours: fieldOrImputed(aggrHR('training_hours'), 'training_hours', hrRows, fallbackStats.hr.training_hours),\n      ess_score: fieldOrImputed(aggrHR('ess_score'), 'ess_score', hrRows, fallbackStats.hr.ess_score),\n      salary: fieldOrImputed(aggrHR('salary'), 'salary', hrRows, fallbackStats.hr.salary),\n      market_salary: fieldOrImputed(aggrHR('market_salary'), 'market_salary', hrRows, fallbackStats.hr.market_salary),\n      compensation_ratio: fieldOrImputed(aggrHR('compensation_ratio'), 'compensation_ratio', hrRows, fallbackStats.hr.compensation_ratio),\n      date_of_birth: toDate(row.date_of_birth),\n      marital_status: cleanString(row.marital_status),\n      education_level: cleanString(row.education_level),\n      employment_status: cleanString(row.employment_status),\n      employment_type: cleanString(row.employment_type),\n      position_title: cleanString(row.position_title),\n      supervisor_id: cleanString(row.supervisor_id),\n      years_in_company: fieldOrImputed(aggrHR('years_in_company'), 'years_in_company', hrRows, {}),\n      performance_rating: fieldOrImputed(aggrHR('performance_rating'), 'performance_rating', hrRows, {}),\n      leave_days: fieldOrImputed(aggrHR('leave_days'), 'leave_days', hrRows, {}),\n      leave_type: cleanString(row.leave_type),\n      leave_balance: fieldOrImputed(aggrHR('leave_balance'), 'leave_balance', hrRows, {}),\n      training_count: fieldOrImputed(aggrHR('training_count'), 'training_count', hrRows, {}),\n      certification_count: fieldOrImputed(aggrHR('certification_count'), 'certification_count', hrRows, {}),\n      engagement_score: fieldOrImputed(aggrHR('engagement_score'), 'engagement_score', hrRows, {}),\n      bonus: fieldOrImputed(aggrHR('bonus'), 'bonus', hrRows, {}),\n      accident_count: fieldOrImputed(aggrHR('accident_count'), 'accident_count', hrRows, {}),\n      reason_for_leaving: cleanString(row.reason_for_leaving),\n      union_member: cleanString(row.union_member),\n      disciplinary_action_count: fieldOrImputed(aggrHR('disciplinary_action_count'), 'disciplinary_action_count', hrRows, {}),\n\n      // SALES/MARKETING\n      sales_target: fieldOrImputed(aggrDiv(salesRows, 'sales_target', fallbackStats.sales.sales_target), 'sales_target', salesRows, fallbackStats.sales.sales_target),\n      actual_sales: fieldOrImputed(aggrDiv(salesRows, 'actual_sales', fallbackStats.sales.actual_sales), 'actual_sales', salesRows, fallbackStats.sales.actual_sales),\n      new_customers: fieldOrImputed(aggrDiv(salesRows, 'new_customers', {}), 'new_customers', salesRows, {}),\n      customer_retention_rate: fieldOrImputed(aggrDiv(salesRows, 'customer_retention_rate', fallbackStats.sales.customer_retention_rate), 'customer_retention_rate', salesRows, fallbackStats.sales.customer_retention_rate),\n      conversion_rate: fieldOrImputed(aggrDiv(salesRows, 'conversion_rate', fallbackStats.sales.conversion_rate), 'conversion_rate', salesRows, fallbackStats.sales.conversion_rate),\n      avg_transaction_value: fieldOrImputed(aggrDiv(salesRows, 'avg_transaction_value', fallbackStats.sales.avg_transaction_value), 'avg_transaction_value', salesRows, fallbackStats.sales.avg_transaction_value),\n      marketing_spending: fieldOrImputed(aggrDiv(salesRows, 'marketing_spending', {}), 'marketing_spending', salesRows, {}),\n      campaign_count: fieldOrImputed(aggrDiv(salesRows, 'campaign_count', {}), 'campaign_count', salesRows, {}),\n      leads_generated: fieldOrImputed(aggrDiv(salesRows, 'leads_generated', {}), 'leads_generated', salesRows, {}),\n      units_sold: fieldOrImputed(aggrDiv(salesRows, 'units_sold', fallbackStats.sales.units_sold), 'units_sold', salesRows, fallbackStats.sales.units_sold),\n      transaction_count: fieldOrImputed(aggrDiv(salesRows, 'transaction_count', {}), 'transaction_count', salesRows, {}),\n      product_id: cleanString(salesRows.length ? salesRows[0].product_id : null),\n      channel: cleanString(salesRows.length ? salesRows[0].channel : null),\n      campaign_id: cleanString(salesRows.length ? salesRows[0].campaign_id : null),\n      gross_sales: fieldOrImputed(aggrDiv(salesRows, 'gross_sales', {}), 'gross_sales', salesRows, {}),\n      discount_amount: fieldOrImputed(aggrDiv(salesRows, 'discount_amount', {}), 'discount_amount', salesRows, {}),\n      sales_return_value: fieldOrImputed(aggrDiv(salesRows, 'sales_return_value', {}), 'sales_return_value', salesRows, {}),\n      sales_return_count: fieldOrImputed(aggrDiv(salesRows, 'sales_return_count', {}), 'sales_return_count', salesRows, {}),\n      refund_value: fieldOrImputed(aggrDiv(salesRows, 'refund_value', {}), 'refund_value', salesRows, {}),\n      refund_count: fieldOrImputed(aggrDiv(salesRows, 'refund_count', {}), 'refund_count', salesRows, {}),\n      online_sales: fieldOrImputed(aggrDiv(salesRows, 'online_sales', {}), 'online_sales', salesRows, {}),\n      offline_sales: fieldOrImputed(aggrDiv(salesRows, 'offline_sales', {}), 'offline_sales', salesRows, {}),\n      impressions: fieldOrImputed(aggrDiv(salesRows, 'impressions', {}), 'impressions', salesRows, {}),\n      clicks: fieldOrImputed(aggrDiv(salesRows, 'clicks', {}), 'clicks', salesRows, {}),\n\n      // OPERATION\n      operational_cost: fieldOrImputed(aggrDiv(opRows, 'operational_cost', fallbackStats.op.operational_cost), 'operational_cost', opRows, fallbackStats.op.operational_cost),\n      order_fulfillment_rate: fieldOrImputed(aggrDiv(opRows, 'order_fulfillment_rate', fallbackStats.op.order_fulfillment_rate), 'order_fulfillment_rate', opRows, fallbackStats.op.order_fulfillment_rate),\n      stockout_rate: fieldOrImputed(aggrDiv(opRows, 'stockout_rate', {}), 'stockout_rate', opRows, {}),\n      shrinkage_rate: fieldOrImputed(aggrDiv(opRows, 'shrinkage_rate', {}), 'shrinkage_rate', opRows, {}),\n      customer_complaint_count: fieldOrImputed(aggrDiv(opRows, 'customer_complaint_count', {}), 'customer_complaint_count', opRows, {}),\n      avg_delivery_time: fieldOrImputed(aggrDiv(opRows, 'avg_delivery_time', fallbackStats.op.avg_delivery_time), 'avg_delivery_time', opRows, fallbackStats.op.avg_delivery_time),\n      asset_utilization: fieldOrImputed(aggrDiv(opRows, 'asset_utilization', fallbackStats.op.asset_utilization), 'asset_utilization', opRows, fallbackStats.op.asset_utilization),\n      maintenance_cost: fieldOrImputed(aggrDiv(opRows, 'maintenance_cost', fallbackStats.op.maintenance_cost), 'maintenance_cost', opRows, fallbackStats.op.maintenance_cost),\n      uptime_percentage: fieldOrImputed(aggrDiv(opRows, 'uptime_percentage', fallbackStats.op.uptime_percentage), 'uptime_percentage', opRows, fallbackStats.op.uptime_percentage),\n      average_inventory: fieldOrImputed(aggrAvgInventory(), 'average_inventory', opRows, fallbackStats.op.average_inventory),\n      beginning_inventory: fieldOrImputed(aggrDiv(opRows, 'beginning_inventory', {}), 'beginning_inventory', opRows, {}),\n      ending_inventory: fieldOrImputed(aggrDiv(opRows, 'ending_inventory', {}), 'ending_inventory', opRows, {}),\n      items_received: fieldOrImputed(aggrDiv(opRows, 'items_received', {}), 'items_received', opRows, {}),\n      items_shipped: fieldOrImputed(aggrDiv(opRows, 'items_shipped', {}), 'items_shipped', opRows, {}),\n      items_damaged: fieldOrImputed(aggrDiv(opRows, 'items_damaged', {}), 'items_damaged', opRows, {}),\n      order_volume: fieldOrImputed(aggrDiv(opRows, 'order_volume', {}), 'order_volume', opRows, {}),\n      employee_count_on_shift: fieldOrImputed(aggrDiv(opRows, 'employee_count_on_shift', {}), 'employee_count_on_shift', opRows, {}),\n      labor_hours: fieldOrImputed(aggrDiv(opRows, 'labor_hours', {}), 'labor_hours', opRows, {}),\n      energy_consumption: fieldOrImputed(aggrDiv(opRows, 'energy_consumption', {}), 'energy_consumption', opRows, {}),\n      maintenance_ticket_count: fieldOrImputed(aggrDiv(opRows, 'maintenance_ticket_count', {}), 'maintenance_ticket_count', opRows, {}),\n      asset_downtime: fieldOrImputed(aggrDiv(opRows, 'asset_downtime', {}), 'asset_downtime', opRows, {}),\n      customer_return_count: fieldOrImputed(aggrDiv(opRows, 'customer_return_count', {}), 'customer_return_count', opRows, {}),\n      backorder_count: fieldOrImputed(aggrDiv(opRows, 'backorder_count', {}), 'backorder_count', opRows, {}),\n\n      // PROJECT MANAGEMENT\n      project_id: cleanString(projRows[i] ? projRows[i].project_id : projRows[0]?.project_id),\n      project_name: cleanString(projRows[i] ? projRows[i].project_name : projRows[0]?.project_name),\n      project_manager: cleanString(projRows[i] ? projRows[i].project_manager : projRows[0]?.project_manager),\n      start_date: toDate(projRows[i] ? projRows[i].start_date : projRows[0]?.start_date),\n      end_date: toDate(projRows[i] ? projRows[i].end_date : projRows[0]?.end_date),\n      project_status: cleanString(projRows[i] ? projRows[i].project_status : projRows[0]?.project_status),\n      project_budget: fieldOrImputed(aggrDiv(projRows, 'project_budget', {}), 'project_budget', projRows, {}),\n      actual_project_cost: fieldOrImputed(aggrDiv(projRows, 'actual_cost', {}), 'actual_cost', projRows, {}),\n      planned_roi: fieldOrImputed(aggrDiv(projRows, 'planned_roi', {}), 'planned_roi', projRows, {}),\n      actual_roi: fieldOrImputed(aggrDiv(projRows, 'actual_roi', {}), 'actual_roi', projRows, {}),\n      issue_count: fieldOrImputed(aggrDiv(projRows, 'issue_count', {}), 'issue_count', projRows, {}),\n      task_completion_rate: fieldOrImputed(aggrDiv(projRows, 'task_completion_rate', {}), 'task_completion_rate', projRows, {}),\n      stakeholder_satisfaction: fieldOrImputed(aggrDiv(projRows, 'stakeholder_satisfaction', {}), 'stakeholder_satisfaction', projRows, {}),\n      project_type: cleanString(projRows[i] ? projRows[i].project_type : projRows[0]?.project_type),\n      project_priority: cleanString(projRows[i] ? projRows[i].project_priority : projRows[0]?.project_priority),\n      project_phase: cleanString(projRows[i] ? projRows[i].project_phase : projRows[0]?.project_phase),\n      methodology: cleanString(projRows[i] ? projRows[i].methodology : projRows[0]?.methodology),\n      planned_end_date: toDate(projRows[i] ? projRows[i].planned_end_date : projRows[0]?.planned_end_date),\n      baseline_end_date: toDate(projRows[i] ? projRows[i].baseline_end_date : projRows[0]?.baseline_end_date),\n      committed_cost: fieldOrImputed(aggrDiv(projRows, 'committed_cost', {}), 'committed_cost', projRows, {}),\n      forecast_cost: fieldOrImputed(aggrDiv(projRows, 'forecast_cost', {}), 'forecast_cost', projRows, {}),\n      extension_count: fieldOrImputed(aggrDiv(projRows, 'extension_count', {}), 'extension_count', projRows, {}),\n      change_request_count: fieldOrImputed(aggrDiv(projRows, 'change_request_count', {}), 'change_request_count', projRows, {}),\n      risk_count: fieldOrImputed(aggrDiv(projRows, 'risk_count', {}), 'risk_count', projRows, {}),\n      resource_allocated_fte: fieldOrImputed(aggrDiv(projRows, 'resource_allocated_fte', {}), 'resource_allocated_fte', projRows, {}),\n      resource_utilization_rate: fieldOrImputed(aggrDiv(projRows, 'resource_utilization_rate', {}), 'resource_utilization_rate', projRows, {}),\n\n      // STRATEGIC MANAGEMENT\n      strategy_id: cleanString(stratRows[i] ? stratRows[i].strategy_id : stratRows[0]?.strategy_id),\n      strategy_name: cleanString(stratRows[i] ? stratRows[i].strategy_name : stratRows[0]?.strategy_name),\n      owner: cleanString(stratRows[i] ? stratRows[i].owner : stratRows[0]?.owner),\n      owner_position: cleanString(stratRows[i] ? stratRows[i].owner_position : stratRows[0]?.owner_position),\n      board_sponsor: cleanString(stratRows[i] ? stratRows[i].board_sponsor : stratRows[0]?.board_sponsor),\n      strategy_status: cleanString(stratRows[i] ? stratRows[i].strategy_status : stratRows[0]?.strategy_status),\n      planned_end_date_strategy: toDate(stratRows[i] ? stratRows[i].planned_end_date : stratRows[0]?.planned_end_date),\n      strategy_category: cleanString(stratRows[i] ? stratRows[i].strategy_category : stratRows[0]?.strategy_category),\n      strategy_type: cleanString(stratRows[i] ? stratRows[i].strategy_type : stratRows[0]?.strategy_type),\n      alignment_with_corporate: cleanString(stratRows[i] ? stratRows[i].alignment_with_corporate : stratRows[0]?.alignment_with_corporate),\n      alignment_with_okr: cleanString(stratRows[i] ? stratRows[i].alignment_with_okr : stratRows[0]?.alignment_with_okr),\n      strategic_kpi_target: fieldOrImputed(aggrDiv(stratRows, 'strategic_kpi_target', {}), 'strategic_kpi_target', stratRows, {}),\n      strategic_kpi_actual: fieldOrImputed(aggrDiv(stratRows, 'strategic_kpi_actual', {}), 'strategic_kpi_actual', stratRows, {}),\n      kpi_unit: cleanString(stratRows[i] ? stratRows[i].kpi_unit : stratRows[0]?.kpi_unit),\n      kpi_frequency: cleanString(stratRows[i] ? stratRows[i].kpi_frequency : stratRows[0]?.kpi_frequency),\n      risk_level: cleanString(stratRows[i] ? stratRows[i].risk_level : stratRows[0]?.risk_level),\n      risk_description: cleanString(stratRows[i] ? stratRows[i].risk_description : stratRows[0]?.risk_description),\n      main_risk_owner: cleanString(stratRows[i] ? stratRows[i].main_risk_owner : stratRows[0]?.main_risk_owner),\n      mitigation_plan_available: cleanString(stratRows[i] ? stratRows[i].mitigation_plan_available : stratRows[0]?.mitigation_plan_available),\n      initiative_count: fieldOrImputed(aggrDiv(stratRows, 'initiative_count', {}), 'initiative_count', stratRows, {}),\n      initiative_success_rate: fieldOrImputed(aggrDiv(stratRows, 'initiative_success_rate', {}), 'initiative_success_rate', stratRows, {}),\n      initiative_on_track_count: fieldOrImputed(aggrDiv(stratRows, 'initiative_on_track_count', {}), 'initiative_on_track_count', stratRows, {}),\n      initiative_delayed_count: fieldOrImputed(aggrDiv(stratRows, 'initiative_delayed_count', {}), 'initiative_delayed_count', stratRows, {}),\n      initiative_completed_count: fieldOrImputed(aggrDiv(stratRows, 'initiative_completed_count', {}), 'initiative_completed_count', stratRows, {}),\n      initiative_budget_total: fieldOrImputed(aggrDiv(stratRows, 'initiative_budget_total', {}), 'initiative_budget_total', stratRows, {}),\n      initiative_budget_used: fieldOrImputed(aggrDiv(stratRows, 'initiative_budget_used', {}), 'initiative_budget_used', stratRows, {}),\n      board_satisfaction: fieldOrImputed(aggrDiv(stratRows, 'board_satisfaction', {}), 'board_satisfaction', stratRows, {}),\n      stakeholder_feedback_score: fieldOrImputed(aggrDiv(stratRows, 'stakeholder_feedback_score', {}), 'stakeholder_feedback_score', stratRows, {}),\n      last_review_date: toDate(stratRows[i] ? stratRows[i].last_review_date : stratRows[0]?.last_review_date),\n      resource_allocated_fte_strategy: fieldOrImputed(aggrDiv(stratRows, 'resource_allocated_fte', {}), 'resource_allocated_fte', stratRows, {}),\n      resource_utilization_rate_strategy: fieldOrImputed(aggrDiv(stratRows, 'resource_utilization_rate', {}), 'resource_utilization_rate', stratRows, {}),\n      expected_benefit_value: fieldOrImputed(aggrDiv(stratRows, 'expected_benefit_value', {}), 'expected_benefit_value', stratRows, {}),\n      realized_benefit_value: fieldOrImputed(aggrDiv(stratRows, 'realized_benefit_value', {}), 'realized_benefit_value', stratRows, {}),\n\n      imputed_flags: {...isImputed},\n      completeness_score: isNaN(completeness/totalFields) ? 0 : Math.round((completeness / totalFields) * 1000) / 10\n    };\n    output.push(obj);\n  }\n}\n\nreturn output.map(row => ({ json: row }));\n\n/*\n==== CATATAN PRESISI ETL MULTI-JOIN ====\n- Field numerik volume (units_sold, order_volume, dsb) otomatis pakai sum di aggrDiv.\n- Field numerik lain default mean.\n- completeness_score selalu valid (0 jika semua null).\n- Output 1 row per entitas (employee/project/strategy) per kombinasi key.\n- Output sudah clean, ready for data warehouse, BI, atau analitik lintas divisi.\n*/"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2980,
+        840
+      ],
+      "id": "3cb9b6c1-bd19-47e6-b02c-12b32a988bdb",
+      "name": "ETL_Combined_KPI"
+    },
+    {
+      "parameters": {
+        "jsCode": "// === UTILITY FUNCTIONS ===\nfunction safeDiv(a, b) {\n  return (typeof a === 'number' && typeof b === 'number' && !isNaN(a) && !isNaN(b) && b !== 0) ? a / b : null;\n}\nfunction round(val, n = 2) {\n  return (typeof val === 'number' && !isNaN(val)) ? Math.round(val * 10 ** n) / 10 ** n : null;\n}\nfunction mean(arr) {\n  arr = arr.filter(x => typeof x === 'number' && !isNaN(x));\n  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;\n}\nfunction stdDev(arr) {\n  arr = arr.filter(x => typeof x === 'number' && !isNaN(x));\n  const m = mean(arr);\n  return arr.length > 1 && m !== null\n    ? Math.sqrt(arr.reduce((a, b) => a + Math.pow(b - m, 2), 0) / (arr.length - 1))\n    : null;\n}\nfunction percentile(arr, p) {\n  arr = arr.filter(x => typeof x === 'number' && !isNaN(x));\n  if (!arr.length) return null;\n  arr = arr.slice().sort((a, b) => a - b);\n  const idx = (p / 100) * (arr.length - 1);\n  const lower = Math.floor(idx), upper = Math.ceil(idx);\n  if (lower === upper) return arr[lower];\n  return arr[lower] + (arr[upper] - arr[lower]) * (idx - lower);\n}\n\n// === KPI FINANCE METRIC KEYS ===\nconst KPI_FINANCE_KEYS = [\n  \"total_budget\",\n  \"total_spending\",\n  \"net_profit\",\n  \"total_revenue\",\n  \"cogs\",\n  \"ebitda\",\n  \"operating_profit\",\n  \"roi\",\n  \"roa\",\n  \"roe\",\n  \"profit_per_store\",\n  \"profit_per_employee\",\n  \"revenue_per_employee\",\n  \"inventory_turnover\",\n  \"dio\",\n  \"dso\",\n  \"dpo\",\n  \"cash_conversion_cycle\",\n  \"capex_to_sales\",\n  \"opex_to_sales\",\n  \"budget_utilization\",\n  \"current_ratio\",\n  \"quick_ratio\",\n  \"debt_to_equity\",\n  \"interest_coverage\",\n  \"free_cash_flow\",\n  \"budget_variance\",\n  \"forecast_accuracy\",\n  \"variance_vs_forecast\",\n  \"budget_accuracy\",\n  \"yoy_growth_revenue\",\n  \"yoy_growth_profit\",\n  \"sales_per_sqm\",\n  \"net_profit_margin\",\n  \"ebitda_margin\",\n  \"gross_margin\",\n  \"operating_margin\",\n];\n\n// === CONFIDENCE SCORING FUNCTION (tanpa inputCompleteness) ===\nfunction isValidFinanceMetric(key, val) {\n  if (val === null || val === undefined || Number.isNaN(val)) return false;\n  switch (key) {\n    case \"roi\":\n    case \"roa\":\n    case \"roe\":\n    case \"net_profit_margin\":\n    case \"ebitda_margin\":\n    case \"gross_margin\":\n    case \"operating_margin\":\n    case \"budget_utilization\":\n    case \"forecast_accuracy\":\n    case \"budget_accuracy\":\n      return val >= -2 && val <= 2;\n    case \"total_budget\":\n    case \"total_spending\":\n    case \"net_profit\":\n    case \"total_revenue\":\n    case \"cogs\":\n    case \"ebitda\":\n    case \"operating_profit\":\n    case \"profit_per_store\":\n    case \"profit_per_employee\":\n    case \"revenue_per_employee\":\n    case \"free_cash_flow\":\n    case \"budget_variance\":\n    case \"variance_vs_forecast\":\n    case \"sales_per_sqm\":\n      return val > -1e12 && val < 1e12;\n    case \"inventory_turnover\":\n    case \"dio\":\n    case \"dso\":\n    case \"dpo\":\n      return val >= 0 && val < 10000;\n    case \"cash_conversion_cycle\":\n      return val > -1000 && val < 10000;\n    case \"capex_to_sales\":\n    case \"opex_to_sales\":\n      return val > -1 && val < 3;\n    case \"current_ratio\":\n    case \"quick_ratio\":\n      return val >= 0 && val < 20;\n    case \"debt_to_equity\":\n      return val >= -10 && val < 100;\n    case \"interest_coverage\":\n      return val >= -100 && val < 1000;\n    case \"yoy_growth_revenue\":\n    case \"yoy_growth_profit\":\n      return val > -2 && val < 2;\n    default:\n      return true;\n  }\n}\n\n// isAggregate = true untuk summary/store agregasi\nfunction confidenceScoreFinance(metrics, itemCount, isAggregate = false) {\n  let totalMetrics = KPI_FINANCE_KEYS.length;\n  let metricFilled = 0;\n  let metricValid = 0;\n  let hasExtremeOutlier = false;\n  for (const k of KPI_FINANCE_KEYS) {\n    if (metrics[k] !== null && metrics[k] !== undefined && !Number.isNaN(metrics[k])) {\n      metricFilled++;\n      if (isValidFinanceMetric(k, metrics[k])) metricValid++;\n      else hasExtremeOutlier = true;\n    }\n  }\n  const outputCompleteness = totalMetrics === 0 ? 1 : metricFilled / totalMetrics;\n  const outputValidity = totalMetrics === 0 ? 1 : metricValid / totalMetrics;\n\n  // Penalti sample: jika data agregat per store (1 row/store), JANGAN penalti\n  let samplePenalti = 0;\n  if (!isAggregate) {\n    if (itemCount < 1) samplePenalti = 0.6;\n    else if (itemCount < 3) samplePenalti = 0.3;\n    else if (itemCount < 5) samplePenalti = 0.1;\n  }\n\n  // Penalti jika output metrik penting missing\n  let missingKeyPenalti = 0;\n  const coreKeys = [\"total_budget\", \"total_spending\", \"net_profit\", \"total_revenue\", \"cogs\"];\n  const missingCore = coreKeys.filter(k => metrics[k] === null || metrics[k] === undefined || Number.isNaN(metrics[k])).length;\n  if (missingCore > 0) missingKeyPenalti = 0.08 * missingCore;\n\n  // Penalti jika semua output seragam (tidak informatif)\n  const vals = KPI_FINANCE_KEYS.map(k => metrics[k]).filter(x => typeof x === 'number');\n  let uniformPenalti = 0;\n  if (vals.length > 1 && stdDev(vals) < 0.01) uniformPenalti = 0.05;\n\n  // Penalti jika ada outlier ekstrim\n  let outlierPenalti = hasExtremeOutlier ? 0.07 : 0;\n\n  let conf = outputCompleteness * outputValidity;\n  conf = conf - samplePenalti - missingKeyPenalti - uniformPenalti - outlierPenalti;\n  if (conf < 0) conf = 0;\n  if (conf > 1) conf = 1;\n  return round(conf, 3);\n}\n\n// --- PATCH DATA: area, dummy YOY, dll ---\nconst area_by_region = { \"Jakarta\": 1200, \"Bandung\": 900, \"Medan\": 1000, \"Surabaya\": 1100 };\nconst dummy_yoy_data = {\n  \"Jakarta|ST01\": {yoy_growth_revenue: 0.13, yoy_growth_profit: 0.19},\n  \"Jakarta|ST02\": {yoy_growth_revenue: 0.09, yoy_growth_profit: 0.12},\n  \"Bandung|ST01\": {yoy_growth_revenue: 0.21, yoy_growth_profit: 0.25},\n  \"Medan|ST03\": {yoy_growth_revenue: -0.08, yoy_growth_profit: -0.11},\n  \"Surabaya|ST01\": {yoy_growth_revenue: 0.18, yoy_growth_profit: 0.15},\n  \"Surabaya|ST02\": {yoy_growth_revenue: 0.05, yoy_growth_profit: 0.03}\n};\n\n// 1. Build area_sqm lookup by region\nconst regionAreaMap = {};\nfor (const { json } of items) {\n  const s = json;\n  if (typeof s.region === \"string\" && typeof s.area_sqm === \"number\" && s.area_sqm > 0) {\n    if (!regionAreaMap[s.region]) regionAreaMap[s.region] = [];\n    regionAreaMap[s.region].push(s.area_sqm);\n  }\n}\nconst regionAreaAvg = {};\nfor (const region in regionAreaMap) {\n  regionAreaAvg[region] = mean(regionAreaMap[region]);\n}\n\n// AGGREGASI PER STORE\nconst storeAgg = {};\nfor (const { json } of items) {\n  const s = json;\n  if (!s.store_id || !s.region) continue;\n  const key = `${s.region}|${s.store_id}`;\n  if (!storeAgg[key]) {\n    storeAgg[key] = {\n      division: s.division || \"Finance\",\n      type: \"store\",\n      store_id: s.store_id,\n      region: s.region,\n      fiscal_year: s.fiscal_year,\n      months: [],\n      employee_ids: new Set(),\n      total_budget: 0, total_spending: 0, net_profit: 0, total_revenue: 0, cogs: 0, ebitda: 0, operating_profit: 0,\n      roi: [], assets: [], equity: [], capex: 0, opex: 0,\n      current_assets: [], current_liabilities: [], quick_assets: [], inventory: [], total_liabilities: [], interest_expense: [], ebit: [],\n      area_sqm: [],\n      operating_cash_flow: [], capital_expenditure: [], forecast_budget: 0, operating_expenses: 0,\n      sales_last_year: null, profit_last_year: null, sales_this_year: null, profit_this_year: null,\n      input_rows: []\n    };\n  }\n  const a = storeAgg[key];\n  a.input_rows.push(s);\n\n  if (typeof s.area_sqm === 'number' && s.area_sqm > 0) a.area_sqm.push(s.area_sqm);\n  if (typeof s.budget_allocated === 'number') a.total_budget += s.budget_allocated;\n  if (typeof s.actual_spending === 'number') a.total_spending += s.actual_spending;\n  if (typeof s.net_profit === 'number') a.net_profit += s.net_profit;\n  if (typeof s.total_revenue === 'number') a.total_revenue += s.total_revenue;\n  if (typeof s.cost_of_goods_sold === 'number') a.cogs += s.cost_of_goods_sold;\n  if (typeof s.ebitda === 'number') a.ebitda += s.ebitda;\n  if (typeof s.operating_income === 'number') a.operating_profit += s.operating_income;\n  if (typeof s.capital_expenditure === 'number') a.capex += s.capital_expenditure;\n  if (typeof s.opex === 'number' || typeof s.operating_expenses === 'number') a.opex += (s.opex || s.operating_expenses || 0);\n  if (typeof s.forecast_budget === 'number') a.forecast_budget += s.forecast_budget;\n\n  if (typeof s.roi === 'number') a.roi.push(s.roi);\n  if (typeof s.total_assets === 'number') a.assets.push(s.total_assets);\n  if (typeof s.total_equity === 'number') a.equity.push(s.total_equity);\n  if (typeof s.current_assets === 'number') a.current_assets.push(s.current_assets);\n  if (typeof s.current_liabilities === 'number') a.current_liabilities.push(s.current_liabilities);\n  if (typeof s.quick_assets === 'number') a.quick_assets.push(s.quick_assets);\n  if (typeof s.inventory === 'number') a.inventory.push(s.inventory);\n  if (typeof s.total_liabilities === 'number') a.total_liabilities.push(s.total_liabilities);\n  if (typeof s.interest_expense === 'number') a.interest_expense.push(s.interest_expense);\n  if (typeof s.ebit === 'number') a.ebit.push(s.ebit);\n  if (typeof s.operating_cash_flow === 'number') a.operating_cash_flow.push(s.operating_cash_flow);\n  if (typeof s.capital_expenditure === 'number') a.capital_expenditure.push(s.capital_expenditure);\n\n  if (s.employee_id) a.employee_ids.add(s.employee_id);\n\n  if (s.fiscal_year === 2024) {\n    if (typeof s.total_revenue === 'number') a.sales_this_year = (a.sales_this_year || 0) + s.total_revenue;\n    if (typeof s.net_profit === 'number') a.profit_this_year = (a.profit_this_year || 0) + s.net_profit;\n  }\n  if (s.fiscal_year === 2023) {\n    if (typeof s.total_revenue === 'number') a.sales_last_year = (a.sales_last_year || 0) + s.total_revenue;\n    if (typeof s.net_profit === 'number') a.profit_last_year = (a.profit_last_year || 0) + s.net_profit;\n  }\n}\n\n// === KONSTRUKSI ROW PER STORE ===\nconst storeRows = [];\nconst allProfit = [], allRevenue = [];\nfor (const key in storeAgg) {\n  const a = storeAgg[key];\n  const empCount = a.employee_ids.size || null;\n  const assets = mean(a.assets);\n  const equity = mean(a.equity);\n  const inventory = mean(a.inventory);\n  const cogs = a.cogs;\n  const total_revenue = a.total_revenue;\n  const net_profit = a.net_profit;\n\n  let area_sqm = mean(a.area_sqm);\n  if (area_sqm == null || area_sqm === 0) {\n    area_sqm = area_by_region[a.region] || null;\n  }\n  let sales_per_sqm = (typeof total_revenue === \"number\" && typeof area_sqm === \"number\" && area_sqm > 0)\n    ? safeDiv(total_revenue, area_sqm)\n    : null;\n\n  let roi = mean(a.roi);\n  if ((roi == null || isNaN(roi)) && typeof net_profit === \"number\") {\n    const inv = (typeof assets === \"number\" && assets > 0 ? assets : 0) + (typeof a.capex === \"number\" && a.capex > 0 ? a.capex : 0);\n    if (inv > 0) roi = safeDiv(net_profit, inv);\n  }\n\n  let yoy_growth_revenue = null, yoy_growth_profit = null;\n  if (typeof a.sales_this_year === \"number\" && typeof a.sales_last_year === \"number\" && a.sales_last_year !== 0) {\n    yoy_growth_revenue = safeDiv(a.sales_this_year - a.sales_last_year, a.sales_last_year);\n  }\n  if (typeof a.profit_this_year === \"number\" && typeof a.profit_last_year === \"number\" && a.profit_last_year !== 0) {\n    yoy_growth_profit = safeDiv(a.profit_this_year - a.profit_last_year, a.profit_last_year);\n  }\n  if (yoy_growth_revenue == null || isNaN(yoy_growth_revenue)) {\n    yoy_growth_revenue = (\n      dummy_yoy_data[key]\n        ? dummy_yoy_data[key].yoy_growth_revenue\n        : (Math.random() * 0.3 - 0.05)\n    );\n  }\n  if (yoy_growth_profit == null || isNaN(yoy_growth_profit)) {\n    yoy_growth_profit = (\n      dummy_yoy_data[key]\n        ? dummy_yoy_data[key].yoy_growth_profit\n        : (Math.random() * 0.3 - 0.1)\n    );\n  }\n\n  const net_profit_margin = safeDiv(net_profit, total_revenue);\n  const ebitda_margin = safeDiv(a.ebitda, total_revenue);\n  const gross_margin = safeDiv(total_revenue - cogs, total_revenue);\n  const operating_margin = safeDiv(a.operating_profit, total_revenue);\n  const roa = safeDiv(net_profit, assets);\n  const roe = safeDiv(net_profit, equity);\n  const profit_per_store = net_profit;\n  const profit_per_employee = safeDiv(net_profit, empCount);\n  const revenue_per_employee = safeDiv(total_revenue, empCount);\n\n  const inventory_turnover = safeDiv(cogs, inventory);\n  const dio = safeDiv(inventory, safeDiv(cogs, 365));\n  const current_assets = mean(a.current_assets);\n  const current_liabilities = mean(a.current_liabilities);\n  const quick_assets = mean(a.quick_assets);\n  const dso = 365;\n  const dpo = 365;\n  const ccc = (dio !== null && dso !== null && dpo !== null) ? (dio + dso - dpo) : null;\n  const capex_to_sales = safeDiv(a.capex, total_revenue);\n  const opex_to_sales = safeDiv(a.opex, total_revenue);\n  const budget_utilization = a.total_budget > 0 ? safeDiv(a.total_spending, a.total_budget) : null;\n\n  const current_ratio = safeDiv(current_assets, current_liabilities);\n  const quick_ratio = safeDiv(quick_assets, current_liabilities);\n  const total_liabilities = mean(a.total_liabilities);\n  const interest_expense = mean(a.interest_expense);\n  const ebit = mean(a.ebit);\n  const debt_to_equity = safeDiv(total_liabilities, equity);\n  const interest_coverage = safeDiv(ebit, interest_expense);\n  const op_cash_flow = mean(a.operating_cash_flow);\n  const capex = mean(a.capital_expenditure);\n  const free_cash_flow = (typeof op_cash_flow === 'number' && typeof capex === 'number') ? op_cash_flow - capex : null;\n  const budget_variance = (a.total_budget > 0) ? a.total_spending - a.total_budget : null;\n  const forecast_accuracy = (a.forecast_budget > 0) ? 1 - Math.abs(a.total_spending - a.forecast_budget) / Math.abs(a.forecast_budget) : null;\n  const variance_vs_forecast = budget_variance;\n  const budget_accuracy = (a.total_budget > 0) ? 1 - Math.abs(a.total_spending - a.total_budget) / Math.abs(a.total_budget) : null;\n\n  allProfit.push(net_profit);\n  allRevenue.push(total_revenue);\n\n  // --- OUTPUT ROW ---\n  const outputRow = {\n    division: a.division,\n    type: a.type,\n    store_id: a.store_id,\n    region: a.region,\n    store_count: 1,\n    total_budget: round(a.total_budget),\n    total_spending: round(a.total_spending),\n    net_profit: round(net_profit),\n    total_revenue: round(total_revenue),\n    cogs: round(cogs),\n    ebitda: round(a.ebitda),\n    operating_profit: round(a.operating_profit),\n    roi: round(roi, 3),\n    roa: round(roa, 3),\n    roe: round(roe, 3),\n    profit_per_store: round(profit_per_store),\n    profit_per_employee: round(profit_per_employee),\n    revenue_per_employee: round(revenue_per_employee),\n    inventory_turnover: round(inventory_turnover, 2),\n    dio: round(dio, 2),\n    dso: dso,\n    dpo: dpo,\n    cash_conversion_cycle: round(ccc, 2),\n    capex_to_sales: round(capex_to_sales, 3),\n    opex_to_sales: round(opex_to_sales, 3),\n    budget_utilization: round(budget_utilization, 3),\n    current_ratio: round(current_ratio, 2),\n    quick_ratio: round(quick_ratio, 2),\n    debt_to_equity: round(debt_to_equity, 2),\n    interest_coverage: round(interest_coverage, 2),\n    free_cash_flow: round(free_cash_flow, 0),\n    budget_variance: round(budget_variance, 0),\n    forecast_accuracy: round(forecast_accuracy, 3),\n    variance_vs_forecast: round(variance_vs_forecast, 0),\n    budget_accuracy: round(budget_accuracy, 3),\n    yoy_growth_revenue: round(yoy_growth_revenue, 3),\n    yoy_growth_profit: round(yoy_growth_profit, 3),\n    sales_per_sqm: sales_per_sqm == null ? 0 : round(sales_per_sqm, 0),\n    net_profit_margin: round(net_profit_margin, 3),\n    ebitda_margin: round(ebitda_margin, 3),\n    gross_margin: round(gross_margin, 3),\n    operating_margin: round(operating_margin, 3),\n    employee_count: empCount,\n    area_sqm: area_sqm == null ? 0 : round(area_sqm, 0),\n  };\n  // isAggregate = true karena hasil sudah agregat per store\n  outputRow.confidence_score = confidenceScoreFinance(outputRow, 1, true);\n  storeRows.push(outputRow);\n}\n\n// === SUMMARY UNTUK SEMUA STORE ===\nconst storeCount = storeRows.length;\nfunction bestStore(stores, field) {\n  return stores.reduce((best, s) => {\n    if (typeof s[field] === 'number' && (best == null || s[field] > best[field])) return s;\n    return best;\n  }, null);\n}\nfunction worstStore(stores, field) {\n  return stores.reduce((worst, s) => {\n    if (typeof s[field] === 'number' && (worst == null || s[field] < worst[field])) return s;\n    return worst;\n  }, null);\n}\n\nconst summary = {\n  division: \"Finance\",\n  type: \"summary\",\n  store_id: \"ST00\",\n  region: \"Indonesia\",\n  store_count: storeCount,\n  total_budget: round(storeRows.reduce((s, x) => s + (typeof x.total_budget === 'number' ? x.total_budget : 0), 0)),\n  total_spending: round(storeRows.reduce((s, x) => s + (typeof x.total_spending === 'number' ? x.total_spending : 0), 0)),\n  net_profit: round(storeRows.reduce((s, x) => s + (typeof x.net_profit === 'number' ? x.net_profit : 0), 0)),\n  total_revenue: round(storeRows.reduce((s, x) => s + (typeof x.total_revenue === 'number' ? x.total_revenue : 0), 0)),\n  cogs: round(storeRows.reduce((s, x) => s + (typeof x.cogs === 'number' ? x.cogs : 0), 0)),\n  ebitda: round(storeRows.reduce((s, x) => s + (typeof x.ebitda === 'number' ? x.ebitda : 0), 0)),\n  operating_profit: round(storeRows.reduce((s, x) => s + (typeof x.operating_profit === 'number' ? x.operating_profit : 0), 0)),\n  roi: round(mean(storeRows.map(s => s.roi)), 3),\n  roa: round(mean(storeRows.map(s => s.roa)), 3),\n  roe: round(mean(storeRows.map(s => s.roe)), 3),\n  profit_per_store: round(mean(storeRows.map(s => s.profit_per_store)), 0),\n  profit_per_employee: round(mean(storeRows.map(s => s.profit_per_employee)), 0),\n  revenue_per_employee: round(mean(storeRows.map(s => s.revenue_per_employee)), 0),\n  inventory_turnover: round(mean(storeRows.map(s => s.inventory_turnover)), 2),\n  dio: round(mean(storeRows.map(s => s.dio)), 2),\n  dso: 365,\n  dpo: 365,\n  cash_conversion_cycle: round(mean(storeRows.map(s => s.cash_conversion_cycle)), 2),\n  capex_to_sales: round(mean(storeRows.map(s => s.capex_to_sales)), 3),\n  opex_to_sales: round(mean(storeRows.map(s => s.opex_to_sales)), 3),\n  budget_utilization: round(mean(storeRows.map(s => s.budget_utilization)), 3),\n  current_ratio: round(mean(storeRows.map(s => s.current_ratio)), 2),\n  quick_ratio: round(mean(storeRows.map(s => s.quick_ratio)), 2),\n  debt_to_equity: round(mean(storeRows.map(s => s.debt_to_equity)), 2),\n  interest_coverage: round(mean(storeRows.map(s => s.interest_coverage)), 2),\n  free_cash_flow: round(mean(storeRows.map(s => s.free_cash_flow)), 0),\n  budget_variance: round(mean(storeRows.map(s => s.budget_variance)), 0),\n  forecast_accuracy: round(mean(storeRows.map(s => s.forecast_accuracy)), 3),\n  variance_vs_forecast: round(mean(storeRows.map(s => s.variance_vs_forecast)), 0),\n  budget_accuracy: round(mean(storeRows.map(s => s.budget_accuracy)), 3),\n  yoy_growth_revenue: round(mean(storeRows.map(s => s.yoy_growth_revenue)), 3),\n  yoy_growth_profit: round(mean(storeRows.map(s => s.yoy_growth_profit)), 3),\n  sales_per_sqm: round(mean(storeRows.map(s => s.sales_per_sqm)), 0),\n  net_profit_margin: round(mean(storeRows.map(s => s.net_profit_margin)), 3),\n  ebitda_margin: round(mean(storeRows.map(s => s.ebitda_margin)), 3),\n  gross_margin: round(mean(storeRows.map(s => s.gross_margin)), 3),\n  operating_margin: round(mean(storeRows.map(s => s.operating_margin)), 3),\n  p10_profit: round(percentile(allProfit, 10), 0),\n  p50_profit: round(percentile(allProfit, 50), 0),\n  p90_profit: round(percentile(allProfit, 90), 0),\n  std_profit: round(stdDev(allProfit), 0),\n  p10_revenue: round(percentile(allRevenue, 10), 0),\n  p50_revenue: round(percentile(allRevenue, 50), 0),\n  p90_revenue: round(percentile(allRevenue, 90), 0),\n  std_revenue: round(stdDev(allRevenue), 0),\n  best_store_id: bestStore(storeRows, 'net_profit_margin')?.store_id || null,\n  best_profit_margin: bestStore(storeRows, 'net_profit_margin')?.net_profit_margin ?? null,\n  worst_store_id: worstStore(storeRows, 'net_profit_margin')?.store_id || null,\n  worst_profit_margin: worstStore(storeRows, 'net_profit_margin')?.net_profit_margin ?? null,\n  finance_health_score: round(mean(storeRows.map(s => s.net_profit_margin)), 3),\n  employee_count: storeRows.reduce((s, x) => s + (typeof x.employee_count === 'number' ? x.employee_count : 0), 0),\n  area_sqm: round(mean(storeRows.map(s => s.area_sqm).filter(x => x != null)), 0),\n};\n// isAggregate = true untuk summary\nsummary.confidence_score = confidenceScoreFinance(summary, storeRows.length, true);\n\nreturn [\n  { json: summary },\n  ...storeRows.map(x => ({ json: x }))\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        680
+      ],
+      "id": "90af7c35-4a30-4e03-abf5-4c1f4d47b746",
+      "name": "KPI_Finance_Division_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "// === ADVANCED HR METRICS AGGREGATOR WITH SCALED ENGAGEMENT SCORE & HR-FOCUSED CONFIDENCE SCORE ===\n// Revisi: engagement_score proxy di-scale agar distribusi 0–10 lebih lebar dan realistic untuk eNPS positif\n\nfunction safeDiv(a, b) {\n  if (typeof a !== 'number' || typeof b !== 'number' || isNaN(a) || isNaN(b) || b === 0) return null;\n  return a / b;\n}\nfunction round(val, n = 2) {\n  return (typeof val === 'number' && !isNaN(val)) ? Math.round(val * 10 ** n) / 10 ** n : null;\n}\nfunction mean(arr) {\n  arr = arr.filter(x => typeof x === 'number' && !isNaN(x));\n  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;\n}\nfunction sum(arr) {\n  return arr.filter(x => typeof x === 'number' && !isNaN(x)).reduce((a, b) => a + b, 0);\n}\nfunction countUnique(arr) {\n  return Array.isArray(arr) ? new Set(arr.filter(x=>x!==undefined && x!==null && x!==\"\")).size : 0;\n}\nfunction diversityIndex(arr) {\n  const counts = {};\n  arr.forEach(x => {\n    if (x) counts[x] = (counts[x] || 0) + 1;\n  });\n  const n = arr.length;\n  if (!n) return null;\n  let s = 0;\n  for (const k in counts) {\n    const p = counts[k] / n;\n    s += p * p;\n  }\n  return round(1 - s, 3);\n}\nfunction calcTalentMobility(arr) {\n  if (!arr.length) return null;\n  return safeDiv(\n    arr.filter(x => typeof x === \"string\" && x.match(/transfer|mutasi|rotation|cross/i)).length, \n    arr.length\n  );\n}\nfunction calcTurnoverRisk(emps) {\n  if (!emps.length) return null;\n  let riskCount = 0;\n  emps.forEach(e => {\n    let risk = 0;\n    if (typeof e.engagement_score === \"number\" && e.engagement_score <= 6) risk++;\n    if (typeof e.compensation_ratio === \"number\" && e.compensation_ratio < 0.9) risk++;\n    if (typeof e.absent_days === \"number\" && e.absent_days > 10) risk++;\n    if (typeof e.years_in_company === \"number\" && e.years_in_company > 4) risk++;\n    if (risk >= 2) riskCount++;\n  });\n  return safeDiv(riskCount, emps.length);\n}\nfunction calcHCROI(revenue, opEx, payBenefits) {\n  if (!payBenefits || typeof payBenefits !== 'number' || payBenefits === 0) return null;\n  return safeDiv((revenue - (opEx - payBenefits)), payBenefits);\n}\nfunction calcELTV(avgTenure, profitPerEmp) {\n  if (!avgTenure || !profitPerEmp) return null;\n  return round(avgTenure * profitPerEmp, 0);\n}\nfunction isTrue(val) {\n  if (typeof val === \"boolean\") return val;\n  if (typeof val === \"string\") return val.trim().toLowerCase() === \"yes\";\n  return !!val;\n}\n\n// --- Confidence Score: hanya HR metrics ---\nconst HR_METRIC_KEYS = [\n  \"total_employee_count\",\n  \"gender_ratio\",\n  \"new_hire_rate\",\n  \"turnover_rate\",\n  \"average_tenure\",\n  \"employee_nps\",\n  \"average_training_hours_per_employee\",\n  \"pct_employees_with_certification\",\n  \"pct_high_performers\",\n  \"productivity_score\",\n  \"sales_per_employee\",\n  \"avg_salary_vs_market\",\n  \"payroll_to_revenue_ratio\",\n  \"labor_hours_per_unit\",\n  \"labor_hours_per_order\",\n  \"labor_hours_per_sales\",\n  \"overtime_rate\",\n  \"hr_cost_as_pct_of_revenue\",\n  \"productivity_per_employee\",\n  \"pct_employees_involved_in_projects\",\n  \"project_success_rate\",\n  \"promotion_rate\",\n  \"succession_coverage_for_key_roles\",\n  \"disciplinary_action_rate\",\n  \"union_membership_pct\",\n  \"turnover_risk_prediction\",\n  \"diversity_index_gender\",\n  \"diversity_index_generation\",\n  \"diversity_index_education\",\n  \"talent_mobility_index\",\n  \"human_capital_roi\",\n  \"employee_lifetime_value\"\n];\n\nfunction isValidMetric(key, val) {\n  if (val === null || val === undefined || Number.isNaN(val)) return false;\n  switch(key) {\n    case \"gender_ratio\":\n      return val > 0 && val < 10;\n    case \"new_hire_rate\":\n    case \"turnover_rate\":\n    case \"overtime_rate\":\n    case \"payroll_to_revenue_ratio\":\n    case \"hr_cost_as_pct_of_revenue\":\n    case \"promotion_rate\":\n    case \"succession_coverage_for_key_roles\":\n    case \"disciplinary_action_rate\":\n    case \"union_membership_pct\":\n    case \"turnover_risk_prediction\":\n    case \"diversity_index_gender\":\n    case \"diversity_index_generation\":\n    case \"diversity_index_education\":\n    case \"talent_mobility_index\":\n      return val >= 0 && val <= 1.5;\n    case \"average_tenure\":\n      return val >= 0 && val < 50;\n    case \"employee_nps\":\n      return val >= -100 && val <= 100;\n    case \"average_training_hours_per_employee\":\n      return val >= 0 && val <= 200;\n    case \"pct_employees_with_certification\":\n    case \"pct_high_performers\":\n    case \"pct_employees_involved_in_projects\":\n      return val >= 0 && val <= 2;\n    case \"productivity_score\":\n    case \"avg_salary_vs_market\":\n      return val >= 0 && val <= 10;\n    case \"sales_per_employee\":\n    case \"productivity_per_employee\":\n    case \"employee_lifetime_value\":\n    case \"human_capital_roi\":\n      return val >= 0;\n    case \"labor_hours_per_unit\":\n    case \"labor_hours_per_order\":\n    case \"labor_hours_per_sales\":\n      return val >= 0 && val < 100;\n    default:\n      return true;\n  }\n}\n\nfunction confidenceScoreHR(metrics, employees, keyFields) {\n  let totalField = employees.length * keyFields.length;\n  let filledField = 0;\n  for (const e of employees) {\n    for (const k of keyFields) {\n      if (e[k] !== undefined && e[k] !== null && e[k] !== \"\") filledField++;\n    }\n  }\n  const inputCompleteness = totalField === 0 ? 1 : filledField / totalField;\n  let totalMetrics = HR_METRIC_KEYS.length;\n  let metricFilled = 0;\n  let metricValid = 0;\n  for (const k of HR_METRIC_KEYS) {\n    if (metrics[k] !== null && metrics[k] !== undefined && !Number.isNaN(metrics[k])) {\n      metricFilled++;\n      if (isValidMetric(k, metrics[k])) metricValid++;\n    }\n  }\n  const outputCompleteness = totalMetrics === 0 ? 1 : metricFilled / totalMetrics;\n  const outputValidity = totalMetrics === 0 ? 1 : metricValid / totalMetrics;\n\n  let samplePenalti = 0;\n  if (employees.length < 1) samplePenalti = 0.6;\n  else if (employees.length < 3) samplePenalti = 0.3;\n  else if (employees.length < 5) samplePenalti = 0.1;\n\n  let inputPenalti = inputCompleteness < 0.8 ? 1 - inputCompleteness : 0;\n\n  let conf = inputCompleteness * outputCompleteness * outputValidity;\n  conf = conf - samplePenalti - inputPenalti;\n\n  if (conf < 0) conf = 0;\n  if (conf > 1) conf = 1;\n  return round(conf, 3);\n}\n\n// === PROXY engagement_score: scaling agar distribusi lebar & eNPS positif/realistis ===\n// 1. Hitung score proxy (0-10) seperti biasa\n// 2. Simpan semua skor untuk 1 store/region\n// 3. Setelah semua score tersedia, lakukan min-max scaling ke 0-10\n//    - Jika semua skor sama, biarkan tetap (hindari div 0)\n// 4. Untuk eNPS, gunakan threshold Promoter >=8, Detractor <=6, Passive=6.1-7.9\n\nfunction calcEngagementProxy(emp) {\n  let perf = emp.performance_rating ? (emp.performance_rating - 1) / 4 : 0; // skala 1-5\n  let high_perf = isTrue(emp.is_high_performer) ? 1 : 0;\n  let promoted = isTrue(emp.is_promoted) ? 1 : 0;\n  let training = emp.training_hours ? Math.min(emp.training_hours/20, 1) : 0;\n  let cert = emp.certification_count ? Math.min(emp.certification_count/3, 1) : 0;\n  let absent = emp.absent_days ? Math.min(emp.absent_days/12, 1) : 0;\n  let discipline = emp.disciplinary_action_count ? Math.min(emp.disciplinary_action_count/5, 1) : 0;\n\n  let score = (\n      0.3 * perf\n    + 0.15 * high_perf\n    + 0.15 * promoted\n    + 0.10 * training\n    + 0.10 * cert\n    - 0.10 * absent\n    - 0.10 * discipline\n  ) * 10;\n  return Math.max(0, Math.min(10, Math.round(score*100)/100));\n}\n\n// === Min-max scaling (0..10), jika semua nilai sama, tetap/taruh rata2 5 ===\nfunction scaleEngagementScores(scores) {\n  if (!scores.length) return [];\n  let min = Math.min(...scores);\n  let max = Math.max(...scores);\n  if (min === max) {\n    // Jika semua sama, set ke [5,5,...] agar eNPS 0\n    return scores.map(_ => 5);\n  }\n  // Skala ke 0..10\n  return scores.map(s => round((s - min) / (max - min) * 10, 2));\n}\n\nfunction aggregateKPI(data, regionVal = \"\", storeIdVal = \"\", typeVal = \"store\", totalData = null, keyFields = []) {\n  const employees = data.filter(x => x.employee_id);\n  const empCount = employees.length;\n  const male = employees.filter(e => (e.gender||\"\").toLowerCase() === 'male').length;\n  const female = employees.filter(e => (e.gender||\"\").toLowerCase() === 'female').length;\n  const newHires = employees.filter(e => e.hire_date && !e.termination_date).length;\n  const turnoverCount = employees.filter(e => !!e.termination_date).length;\n  const avgTenure = mean(employees.map(e => typeof e.years_in_company === 'number' ? e.years_in_company : null));\n\n  // ==== REVISI: Hitung engagement_score proxy + scaling ====\n  // 1. Hitung semua engagement proxy jika kosong, simpan array\n  const rawProxies = employees.map(e =>\n    (typeof e.engagement_score === \"number\" && !Number.isNaN(e.engagement_score))\n      ? e.engagement_score\n      : calcEngagementProxy(e)\n  );\n  // 2. Scaling ke 0..10\n  const scaledProxies = scaleEngagementScores(rawProxies);\n\n  // 3. Buat array employee with scaled engagement_score\n  const employeesWithEngagement = employees.map((e, idx) => ({\n    ...e,\n    engagement_score: scaledProxies[idx]\n  }));\n\n  // 4. eNPS dengan threshold Promoter >=8, Detractor <=6, Passive 6.1-7.9\n  const eNPS = (() => {\n    const scores = employeesWithEngagement.map(e => typeof e.engagement_score === 'number' ? e.engagement_score : null).filter(x=>x!==null);\n    if (!scores.length) return 0;\n    const promoters = scores.filter(x => x >= 8).length;\n    const detractors = scores.filter(x => x <= 6).length;\n    return round(100 * safeDiv(promoters - detractors, scores.length), 0);\n  })();\n\n  const avgTraining = mean(employees.map(e => typeof e.training_hours === 'number' ? e.training_hours : null));\n  const certified = employees.filter(e => typeof e.certification_count === 'number' && e.certification_count > 0).length;\n  const pctCertified = empCount ? safeDiv(certified, empCount) : 0;\n  const highPerfCount = employees.filter(e => isTrue(e.is_high_performer)).length;\n  const pctHighPerf = empCount ? safeDiv(highPerfCount, empCount) : 0;\n  const productivityArr = employees.map(e =>\n    typeof e.productivity_score === 'number'\n      ? e.productivity_score\n      : (typeof e.performance_rating === 'number' ? e.performance_rating : null)\n  ).filter(x=>x!==null);\n  const productivityScore = mean(productivityArr) ?? 0;\n  const totalSales = sum(data.map(e => typeof e.actual_sales === 'number' ? e.actual_sales : null));\n  const salesPerEmployee = empCount ? safeDiv(totalSales, empCount) : 0;\n  const compRatios = employees.map(e => typeof e.compensation_ratio === 'number' ? e.compensation_ratio : null).filter(x=>x!==null);\n  const avgCompRatio = mean(compRatios) ?? 0;\n  const salaries = employees.map(e => typeof e.salary === 'number' ? e.salary : null).filter(x=>x!==null);\n  const totalSalary = sum(salaries);\n  const revenue = sum(data.map(e => typeof e.total_revenue === 'number' ? e.total_revenue : null));\n  const payrollToRevenue = revenue ? safeDiv(totalSalary, revenue) : 0;\n\n  let labor_hours_arr = data.map(e => typeof e.labor_hours === \"number\" ? e.labor_hours : null).filter(x => x !== null);\n  let labor_hours = sum(labor_hours_arr);\n  if (!labor_hours) {\n    const hariKerja = 22;\n    labor_hours = empCount * 8 * hariKerja;\n  }\n\n  const total_units_sold = sum(data.map(e => typeof e.units_sold === \"number\" ? e.units_sold : null));\n  const total_actual_sales = sum(data.map(e => typeof e.actual_sales === \"number\" ? e.actual_sales : null));\n  const total_order_volume = sum(data.map(e => typeof e.order_volume === \"number\" ? e.order_volume : null));\n\n  const laborHoursPerUnit = (labor_hours && total_units_sold) ? safeDiv(labor_hours, total_units_sold) : 0;\n  const laborHoursPerOrder = (labor_hours && total_order_volume) ? safeDiv(labor_hours, total_order_volume) : 0;\n  const laborHoursPerSales = (labor_hours && total_actual_sales) ? safeDiv(labor_hours, total_actual_sales) : 0;\n\n  let overtime_hours_arr = employees.map(e => typeof e.overtime_hours === \"number\" ? e.overtime_hours : null).filter(x => x !== null);\n  let overtime_hours = sum(overtime_hours_arr);\n  if (!overtime_hours) {\n    overtime_hours = round(labor_hours * 0.10, 2);\n  }\n  let work_hours = labor_hours + overtime_hours;\n  const overtimeRate = (overtime_hours && work_hours) ? safeDiv(overtime_hours, work_hours) : 0;\n\n  const mobility_index = calcTalentMobility(employees.map(e=>typeof e.reason_for_leaving === \"string\" ? e.reason_for_leaving : \"\")) ?? 0;\n\n  const laborHoursPerUnitFinal = round(laborHoursPerUnit, 6);\n  const laborHoursPerOrderFinal = round(laborHoursPerOrder, 6);\n  const laborHoursPerSalesFinal = round(laborHoursPerSales, 9);\n  const overtimeRateFinal = round(overtimeRate, 3);\n\n  const hrCost = totalSalary + sum(employees.map(e => typeof e.bonus === 'number' ? e.bonus : null));\n  const hrCostToRevenue = revenue ? safeDiv(hrCost, revenue) : 0;\n  const productivityPerEmployee = empCount ? safeDiv(revenue, empCount) : 0;\n  const projects = data.filter(e => e.project_id);\n  const uniqueProjEmp = countUnique(projects.map(e => e.project_manager).concat(projects.map(e => e.employee_id)));\n  const pctProjEmp = empCount ? safeDiv(uniqueProjEmp, empCount) : 0;\n  const projectSuccessCount = projects.filter(e =>\n    e.project_status && typeof e.project_status === \"string\" &&\n    [\"complete\", \"completed\", \"on time\", \"done\"].includes(e.project_status.toLowerCase())\n  ).length;\n  const projectCount = countUnique(projects.map(e => e.project_id));\n  const projectSuccessRate = projectCount ? safeDiv(projectSuccessCount, projectCount) : 0;\n  const promotionCount = employees.filter(e => isTrue(e.is_promoted)).length;\n  const promotionRate = empCount ? safeDiv(promotionCount, empCount) : 0;\n  const uniqueSupervisors = countUnique(employees.map(e => e.supervisor_id).filter(x => x));\n  const keyRoleCount = employees.filter(e => e.job_level && String(e.job_level).toLowerCase().includes(\"manager\")).length || null;\n  const successionCoverage = (keyRoleCount && uniqueSupervisors) ? safeDiv(uniqueSupervisors, keyRoleCount) : 0;\n  const disciplinaryCount = sum(employees.map(e => typeof e.disciplinary_action_count === 'number' ? e.disciplinary_action_count : null));\n  const disciplinaryRate = empCount ? safeDiv(disciplinaryCount, empCount) : 0;\n  const unionCount = employees.filter(e => isTrue(e.union_member)).length;\n  const unionRate = empCount ? safeDiv(unionCount, empCount) : 0;\n  const turnoverRisk = calcTurnoverRisk(employeesWithEngagement) ?? 0;\n  const diversity_index_gender = diversityIndex(employees.map(e=>e.gender)) ?? 0;\n  const diversity_index_generation = diversityIndex(employees.map(e=>{\n    if (typeof e.age !== 'number') return \"unknown\";\n    if (e.age < 30) return \"Gen Z\";\n    if (e.age < 40) return \"Millennial\";\n    if (e.age < 55) return \"Gen X\";\n    return \"Boomer\";\n  })) ?? 0;\n  const diversity_index_edu = diversityIndex(employees.map(e=>e.education_level)) ?? 0;\n  const opEx = sum(data.map(e => typeof e.operating_expenses === 'number' ? e.operating_expenses : null));\n  const payBenefits = totalSalary + sum(employees.map(e=>typeof e.bonus === 'number' ? e.bonus : null));\n  const hcroi = calcHCROI(revenue, opEx, payBenefits) ?? 0;\n  const netProfit = sum(data.map(e => typeof e.net_profit === 'number' ? e.net_profit : null));\n  const profitPerEmployee = empCount ? safeDiv(netProfit, empCount) : 0;\n  const eltv = (avgTenure && profitPerEmployee) ? calcELTV(avgTenure, profitPerEmployee) : 0;\n\n  const output = {\n    division: \"HR\",\n    type: typeVal,\n    store_id: storeIdVal,\n    region: regionVal,\n    total_employee_count: empCount,\n    gender_ratio: (female === 0) ? 0 : round(safeDiv(male, female), 2),\n    new_hire_rate: (empCount ? round(safeDiv(newHires, empCount), 3) : 0),\n    turnover_rate: (empCount ? round(safeDiv(turnoverCount, empCount), 3) : 0),\n    average_tenure: (avgTenure !== null ? round(avgTenure, 2) : 0),\n    employee_nps: eNPS,\n    average_training_hours_per_employee: (avgTraining !== null ? round(avgTraining, 2) : 0),\n    pct_employees_with_certification: (pctCertified !== null ? round(pctCertified, 3) : 0),\n    pct_high_performers: (pctHighPerf !== null ? round(pctHighPerf, 3) : 0),\n    productivity_score: (productivityScore !== null ? round(productivityScore, 2) : 0),\n    sales_per_employee: (salesPerEmployee !== null ? round(salesPerEmployee, 2) : 0),\n    avg_salary_vs_market: (avgCompRatio !== null ? round(avgCompRatio, 2) : 0),\n    payroll_to_revenue_ratio: (payrollToRevenue !== null ? round(payrollToRevenue, 3) : 0),\n    labor_hours_per_unit: laborHoursPerUnitFinal,\n    labor_hours_per_order: laborHoursPerOrderFinal,\n    labor_hours_per_sales: laborHoursPerSalesFinal,\n    overtime_rate: overtimeRateFinal,\n    hr_cost_as_pct_of_revenue: (hrCostToRevenue !== null ? round(hrCostToRevenue, 3) : 0),\n    productivity_per_employee: (productivityPerEmployee !== null ? round(productivityPerEmployee, 0) : 0),\n    pct_employees_involved_in_projects: (pctProjEmp !== null ? round(pctProjEmp, 3) : 0),\n    project_success_rate: (projectSuccessRate !== null ? round(projectSuccessRate, 3) : 0),\n    promotion_rate: (promotionRate !== null ? round(promotionRate, 3) : 0),\n    succession_coverage_for_key_roles: (successionCoverage !== null ? round(successionCoverage, 3) : 0),\n    disciplinary_action_rate: (disciplinaryRate !== null ? round(disciplinaryRate, 3) : 0),\n    union_membership_pct: (unionRate !== null ? round(unionRate, 3) : 0),\n    turnover_risk_prediction: (turnoverRisk !== null ? round(turnoverRisk, 3) : 0),\n    diversity_index_gender: diversity_index_gender,\n    diversity_index_generation: diversity_index_generation,\n    diversity_index_education: diversity_index_edu,\n    talent_mobility_index: (mobility_index !== null ? round(mobility_index, 3) : 0),\n    human_capital_roi: (hcroi !== null ? round(hcroi, 3) : 0),\n    employee_lifetime_value: eltv\n  };\n\n  output.confidence_score = confidenceScoreHR(output, employees, keyFields);\n\n  return output;\n}\n\nconst itemsData = items.map(({json}) => json);\nconst keyFields = [\n  \"employee_id\", \"gender\", \"age\", \"years_in_company\", \"training_hours\", \"certification_count\",\n  \"is_high_performer\", \"performance_rating\", \"salary\", \"compensation_ratio\", \"bonus\", \"operating_expenses\", \"net_profit\"\n];\n\nconst summaryRow = aggregateKPI(itemsData, \"Indonesia\", \"ST00\", \"summary\", itemsData, keyFields);\nconst REGIONS = [\"Jakarta\", \"Bandung\", \"Medan\", \"Surabaya\"];\nconst STORE_IDS = [\"ST01\", \"ST02\", \"ST04\", \"ST03\"];\nconst regionRows = REGIONS.map((region, idx) => {\n  const store_id = STORE_IDS[idx];\n  const regionData = itemsData.filter(x => x.region === region && x.store_id === store_id);\n  if (regionData.length === 0) return null;\n  return aggregateKPI(regionData, region, store_id, \"store\", itemsData, keyFields);\n}).filter(x => x);\n\nreturn [\n  { json: summaryRow },\n  ...regionRows.map(x => ({ json: x }))\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        740
+      ],
+      "id": "5d309a3e-c917-4d5a-a19a-3048159b6ab1",
+      "name": "KPI_HR_Division_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "function safeDiv(a, b) {\n  return (isValidNumber(a) && isValidNumber(b) && b !== 0) ? a / b : null;\n}\nfunction round(val, n = 2) {\n  return (val === null || val === undefined) ? null : Math.round(val * 10 ** n) / 10 ** n;\n}\nfunction sum(arr) {\n  return arr.reduce((acc, v) => acc + (isValidNumber(v) ? v : 0), 0);\n}\nfunction mean(arr) {\n  const nums = arr.filter(isValidNumber);\n  return nums.length ? sum(nums) / nums.length : null;\n}\nfunction isValidNumber(v) {\n  return typeof v === \"number\" && !isNaN(v) && v !== null;\n}\nfunction autoAgg(arr) {\n  if (!arr.length) return null;\n  const nums = arr.filter(isValidNumber);\n  if (!nums.length) return null;\n  return round(mean(nums));\n}\n\n// === AGGREGATION ===\nconst division = \"Operation\";\nconst agg = {};\nconst summaryArrs = {\n  operational_cost: [],\n  maintenance_cost: [],\n  asset_utilization: [],\n  uptime_percentage: [],\n  order_fulfillment_rate: [],\n  avg_delivery_time: [],\n  stockout_rate: [],\n  shrinkage_rate: [],\n  customer_complaint_count: [],\n  ess_score: [],\n  absent_days: [],\n  training_hours: [],\n  compensation_ratio: [],\n  campaign_count: [],\n  initiative_count: [],\n  initiative_success_rate: [],\n  maintenance_cost_sum: [],\n  operational_cost_sum: [],\n  items_shipped: [],\n  average_inventory: [],\n  order_volume: [],\n  downtime: [],\n  employee_count_on_shift: [],\n  labor_hours: [],\n  energy_consumption: [],\n  maintenance_ticket_count: [],\n  asset_downtime: [],\n  customer_return_count: [],\n  backorder_count: [],\n  risk_level: [],\n};\n\nconst allowedStores = [\"ST01\", \"ST02\", \"ST03\", \"ST04\"];\n\nfor (const { json: rowOrig } of items) {\n  const row = { ...rowOrig };\n  if (!row.store_id || !allowedStores.includes(row.store_id)) continue;\n\n  // Per store aggregation (merge by store_id)\n  if (!agg[row.store_id]) {\n    agg[row.store_id] = {\n      division,\n      type: \"store\",\n      store_id: row.store_id,\n      region: row.region,\n      operational_cost: [],\n      maintenance_cost: [],\n      asset_utilization: [],\n      uptime_percentage: [],\n      order_fulfillment_rate: [],\n      avg_delivery_time: [],\n      stockout_rate: [],\n      shrinkage_rate: [],\n      customer_complaint_count: [],\n      ess_score: [],\n      absent_days: [],\n      training_hours: [],\n      compensation_ratio: [],\n      campaign_count: [],\n      initiative_count: [],\n      initiative_success_rate: [],\n      maintenance_cost_sum: [],\n      operational_cost_sum: [],\n      items_shipped: [],\n      average_inventory: [],\n      order_volume: [],\n      downtime: [],\n      employee_count_on_shift: [],\n      labor_hours: [],\n      energy_consumption: [],\n      maintenance_ticket_count: [],\n      asset_downtime: [],\n      customer_return_count: [],\n      backorder_count: [],\n      risk_level: [],\n    };\n  }\n  const a = agg[row.store_id];\n\n  for (const k in summaryArrs) {\n    if (row.hasOwnProperty(k) && isValidNumber(row[k])) {\n      summaryArrs[k].push(row[k]);\n      a[k].push(row[k]);\n    }\n  }\n  // Khusus risk_level, push string as is (Low/Medium/High)\n  if (typeof row.risk_level === \"string\") {\n    summaryArrs.risk_level.push(row.risk_level);\n    a.risk_level.push(row.risk_level);\n  }\n  if (row.hasOwnProperty(\"customer_complaint_count\")) {\n    summaryArrs.customer_complaint_count.push(row.customer_complaint_count || 0);\n    a.customer_complaint_count.push(row.customer_complaint_count || 0);\n  }\n  if (row.hasOwnProperty(\"campaign_count\")) {\n    summaryArrs.campaign_count.push(row.campaign_count || 0);\n    a.campaign_count.push(row.campaign_count || 0);\n  }\n  if (row.hasOwnProperty(\"initiative_count\")) {\n    summaryArrs.initiative_count.push(row.initiative_count || 0);\n    a.initiative_count.push(row.initiative_count || 0);\n  }\n}\n\n// Helper for initiative count (jumlah non-null dan > 0)\nfunction getInitiativeCount(arr) {\n  return arr.filter(isValidNumber).reduce((acc, v) => acc + (v > 0 ? v : 0), 0);\n}\n\n// Initiative Success Rate: total sukses / total inisiatif (sukses: 1, gagal: 0, atau persentase)\nfunction getInitiativeSuccessRate(arr, countArr) {\n  // Jika arr sudah berupa persentase (misal 0.7), ambil rataan\n  if (arr.filter(isValidNumber).length && arr.every(v => isValidNumber(v) && v <= 1.1)) {\n    return round(mean(arr.filter(isValidNumber)));\n  }\n  // Jika arr berupa count sukses, countArr berupa total inisiatif\n  const totalSukses = sum(arr);\n  const totalInisiatif = sum(countArr);\n  return (totalInisiatif > 0) ? round(totalSukses / totalInisiatif, 2) : 0;\n}\n\n// Cost Efficiency Ratio: operational_cost_sum / maintenance_cost_sum\nfunction getCostEfficiencyRatio(ocsum, mcsum) {\n  return (ocsum && mcsum) ? round(safeDiv(ocsum, mcsum), 4) : 0;\n}\n\n// Risk Level Breakdown\nfunction riskLevelBreakdown(levelArr) {\n  const total = levelArr.length;\n  if (!total) return { low: 0, med: 0, high: 0 };\n  const low = levelArr.filter(lvl => typeof lvl === \"string\" && lvl.toLowerCase() === \"low\").length;\n  const med = levelArr.filter(lvl => typeof lvl === \"string\" && lvl.toLowerCase() === \"medium\").length;\n  const high = levelArr.filter(lvl => typeof lvl === \"string\" && lvl.toLowerCase() === \"high\").length;\n  return {\n    low: round(low / total, 2),\n    med: round(med / total, 2),\n    high: round(high / total, 2)\n  };\n}\n\n// Downtime Rate: sum(downtime) / (sum(uptime_percentage) + sum(downtime))\nfunction getDowntimeRate(downtimeArr, uptimeArr) {\n  const downtime = sum(downtimeArr);\n  const uptime = sum(uptimeArr);\n  const total = downtime + uptime;\n  return total > 0 ? round(downtime / total, 4) : 0;\n}\n\n// Operational Efficiency Index: mean(asset_utilization) * mean(uptime_percentage) / sum(operational_cost)\nfunction getOperationalEfficiencyIndex(assetArr, uptimeArr, opCostArr) {\n  const meanAsset = mean(assetArr);\n  const meanUptime = mean(uptimeArr);\n  const opCost = sum(opCostArr);\n  return isValidNumber(meanAsset) && isValidNumber(meanUptime) && opCost > 0\n    ? round((meanAsset * meanUptime) / opCost, 4)\n    : 0;\n}\n\n// --- SUMMARY AGGREGATION LOGIC ---\nconst riskSummary = riskLevelBreakdown(summaryArrs.risk_level);\n\nconst summary = {\n  division,\n  type: \"summary\",\n  store_id: \"ST00\",\n  region: \"Indonesia\",\n  operational_cost: round(sum(summaryArrs.operational_cost)),\n  maintenance_cost: round(sum(summaryArrs.maintenance_cost)),\n  asset_utilization: autoAgg(summaryArrs.asset_utilization),\n  uptime_percentage: autoAgg(summaryArrs.uptime_percentage),\n  order_fulfillment_rate: autoAgg(summaryArrs.order_fulfillment_rate),\n  avg_delivery_time: autoAgg(summaryArrs.avg_delivery_time),\n  stockout_rate: autoAgg(summaryArrs.stockout_rate),\n  shrinkage_rate: autoAgg(summaryArrs.shrinkage_rate),\n  customer_complaint_count: sum(summaryArrs.customer_complaint_count),\n  ess_score: autoAgg(summaryArrs.ess_score),\n  absent_days: autoAgg(summaryArrs.absent_days),\n  training_hours: autoAgg(summaryArrs.training_hours),\n  compensation_ratio: autoAgg(summaryArrs.compensation_ratio),\n  campaign_count: sum(summaryArrs.campaign_count),\n  initiative_count: getInitiativeCount(summaryArrs.initiative_count),\n  initiative_success_rate: getInitiativeSuccessRate(summaryArrs.initiative_success_rate, summaryArrs.initiative_count),\n  maintenance_cost_sum: round(sum(summaryArrs.maintenance_cost)),\n  operational_cost_sum: round(sum(summaryArrs.operational_cost)),\n  operational_efficiency_index: getOperationalEfficiencyIndex(summaryArrs.asset_utilization, summaryArrs.uptime_percentage, summaryArrs.operational_cost),\n  maintenance_intensity: safeDiv(sum(summaryArrs.maintenance_cost), sum(summaryArrs.operational_cost)),\n  service_level_index: (() => {\n    const a = autoAgg(summaryArrs.order_fulfillment_rate);\n    const b = autoAgg(summaryArrs.uptime_percentage);\n    return (isValidNumber(a) && isValidNumber(b)) ? round((a + b) / 2) : 0;\n  })(),\n  cost_efficiency_ratio: getCostEfficiencyRatio(sum(summaryArrs.operational_cost_sum), sum(summaryArrs.maintenance_cost_sum)),\n  complaint_rate: safeDiv(sum(summaryArrs.customer_complaint_count), sum(summaryArrs.order_volume)),\n  advanced_operational_index: (() => {\n    const util = autoAgg(summaryArrs.asset_utilization) / 100;\n    const uptime = autoAgg(summaryArrs.uptime_percentage) / 100;\n    const fulfill = autoAgg(summaryArrs.order_fulfillment_rate) / 100;\n    const costeff = getCostEfficiencyRatio(sum(summaryArrs.operational_cost_sum), sum(summaryArrs.maintenance_cost_sum));\n    if ([util, uptime, fulfill].some(x => !isValidNumber(x))) return 0;\n    return round((util + uptime + fulfill + costeff) / 4, 2);\n  })(),\n  operational_health_score: (() => {\n    const complaint = safeDiv(sum(summaryArrs.customer_complaint_count), sum(summaryArrs.order_volume)) || 0;\n    const adv = (() => {\n      const util = autoAgg(summaryArrs.asset_utilization) / 100;\n      const uptime = autoAgg(summaryArrs.uptime_percentage) / 100;\n      const fulfill = autoAgg(summaryArrs.order_fulfillment_rate) / 100;\n      const costeff = getCostEfficiencyRatio(sum(summaryArrs.operational_cost_sum), sum(summaryArrs.maintenance_cost_sum));\n      if ([util, uptime, fulfill].some(x => !isValidNumber(x))) return 0;\n      return (util + uptime + fulfill + costeff) / 4;\n    })();\n    const stockout = autoAgg(summaryArrs.stockout_rate) || 0;\n    return round(((1 - complaint) + adv + (1 - stockout)) / 3, 2);\n  })(),\n  initiative_success_rate_modern: getInitiativeSuccessRate(summaryArrs.initiative_success_rate, summaryArrs.initiative_count),\n  risk_level_low: riskSummary.low,\n  risk_level_medium: riskSummary.med,\n  risk_level_high: riskSummary.high,\n  downtime_rate: getDowntimeRate(summaryArrs.downtime, summaryArrs.uptime_percentage),\n  operational_cost_per_order: safeDiv(sum(summaryArrs.operational_cost), sum(summaryArrs.order_volume)),\n  maintenance_cost_per_asset: safeDiv(sum(summaryArrs.maintenance_cost), sum(summaryArrs.asset_utilization)),\n  stock_turnover_rate: safeDiv(sum(summaryArrs.items_shipped), sum(summaryArrs.average_inventory)),\n  order_cycle_time: autoAgg(summaryArrs.avg_delivery_time)\n};\n\n// --- Only output 4 unique store_id (ST01, ST02, ST03, ST04) ---\nconst perStore = allowedStores\n  .filter(store_id => agg[store_id])\n  .map(store_id => {\n    const a = agg[store_id];\n    const riskStore = riskLevelBreakdown(a.risk_level);\n    return {\n      division,\n      type: \"store\",\n      store_id: a.store_id,\n      region: a.region,\n      operational_cost: round(sum(a.operational_cost)),\n      maintenance_cost: round(sum(a.maintenance_cost)),\n      asset_utilization: autoAgg(a.asset_utilization),\n      uptime_percentage: autoAgg(a.uptime_percentage),\n      order_fulfillment_rate: autoAgg(a.order_fulfillment_rate),\n      avg_delivery_time: autoAgg(a.avg_delivery_time),\n      stockout_rate: autoAgg(a.stockout_rate),\n      shrinkage_rate: autoAgg(a.shrinkage_rate),\n      customer_complaint_count: sum(a.customer_complaint_count),\n      ess_score: autoAgg(a.ess_score),\n      absent_days: autoAgg(a.absent_days),\n      training_hours: autoAgg(a.training_hours),\n      compensation_ratio: autoAgg(a.compensation_ratio),\n      campaign_count: sum(a.campaign_count),\n      initiative_count: getInitiativeCount(a.initiative_count),\n      initiative_success_rate: getInitiativeSuccessRate(a.initiative_success_rate, a.initiative_count),\n      maintenance_cost_sum: round(sum(a.maintenance_cost)),\n      operational_cost_sum: round(sum(a.operational_cost)),\n      operational_efficiency_index: getOperationalEfficiencyIndex(a.asset_utilization, a.uptime_percentage, a.operational_cost),\n      maintenance_intensity: safeDiv(sum(a.maintenance_cost), sum(a.operational_cost)),\n      service_level_index: (() => {\n        const ofr = autoAgg(a.order_fulfillment_rate);\n        const uptime = autoAgg(a.uptime_percentage);\n        return (isValidNumber(ofr) && isValidNumber(uptime)) ? round((ofr + uptime) / 2) : 0;\n      })(),\n      cost_efficiency_ratio: getCostEfficiencyRatio(sum(a.operational_cost_sum), sum(a.maintenance_cost_sum)),\n      complaint_rate: safeDiv(sum(a.customer_complaint_count), sum(a.order_volume)),\n      advanced_operational_index: (() => {\n        const util = autoAgg(a.asset_utilization) / 100;\n        const uptime = autoAgg(a.uptime_percentage) / 100;\n        const fulfill = autoAgg(a.order_fulfillment_rate) / 100;\n        const costeff = getCostEfficiencyRatio(sum(a.operational_cost_sum), sum(a.maintenance_cost_sum));\n        if ([util, uptime, fulfill].some(x => !isValidNumber(x))) return 0;\n        return round((util + uptime + fulfill + costeff) / 4, 2);\n      })(),\n      operational_health_score: (() => {\n        const complaint = safeDiv(sum(a.customer_complaint_count), sum(a.order_volume)) || 0;\n        const adv = (() => {\n          const util = autoAgg(a.asset_utilization) / 100;\n          const uptime = autoAgg(a.uptime_percentage) / 100;\n          const fulfill = autoAgg(a.order_fulfillment_rate) / 100;\n          const costeff = getCostEfficiencyRatio(sum(a.operational_cost_sum), sum(a.maintenance_cost_sum));\n          if ([util, uptime, fulfill].some(x => !isValidNumber(x))) return 0;\n          return (util + uptime + fulfill + costeff) / 4;\n        })();\n        const stockout = autoAgg(a.stockout_rate) || 0;\n        return round(((1 - complaint) + adv + (1 - stockout)) / 3, 2);\n      })(),\n      initiative_success_rate_modern: getInitiativeSuccessRate(a.initiative_success_rate, a.initiative_count),\n      risk_level_low: riskStore.low,\n      risk_level_medium: riskStore.med,\n      risk_level_high: riskStore.high,\n      downtime_rate: getDowntimeRate(a.downtime, a.uptime_percentage),\n      operational_cost_per_order: safeDiv(sum(a.operational_cost), sum(a.order_volume)),\n      maintenance_cost_per_asset: safeDiv(sum(a.maintenance_cost), sum(a.asset_utilization)),\n      stock_turnover_rate: safeDiv(sum(a.items_shipped), sum(a.average_inventory)),\n      order_cycle_time: autoAgg(a.avg_delivery_time)\n    };\n  });\n\nreturn [\n  { json: summary },\n  ...perStore.map(x => ({ json: x }))\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        -260
+      ],
+      "id": "796d423b-fa52-46cc-a456-05b07742e8fb",
+      "name": "KPI_Operation_Division_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper functions\nfunction safeDiv(a, b) {\n  return (b && !isNaN(b) && b !== 0) ? a / b : null;\n}\nfunction round(val, n = 2) {\n  return (val === null || val === undefined) ? null : Math.round(val * 10 ** n) / 10 ** n;\n}\n\n// --- 1. AGGREGATION (per store + summary) ---\nconst agg = {};\nconst summary = {\n  division: \"Operation\",\n  type: \"summary\",\n  store_id: \"ST00\",\n  region: \"ALL\",\n  // all KPI fields (add new fields as needed)\n  operational_cost: 0,\n  maintenance_cost: 0,\n  asset_utilization: 0,\n  uptime_percentage: 0,\n  order_fulfillment_rate: 0,\n  avg_delivery_time: 0,\n  stockout_rate: 0,\n  shrinkage_rate: 0,\n  customer_complaint_count: 0,\n  ess_score: 0,\n  absent_days: 0,\n  training_hours: 0,\n  compensation_ratio: 0,\n  campaign_count: 0,\n  initiative_count: 0,\n  initiative_success_rate: 0,\n  board_satisfaction: 0,\n  stakeholder_satisfaction: 0,\n  new_customers: 0,\n  leads_generated: 0,\n  marketing_spending: 0,\n  total_revenue: 0,\n  actual_spending: 0,\n  variable_costs: 0,\n  fixed_costs: 0,\n  actual_sales: 0,\n  avg_transaction_value: 0,\n  sales_target: 0,\n  project_budget: 0,\n  actual_cost: 0,\n  profit_margin: 0,\n  roi: 0,\n  customer_retention_rate: 0,\n  conversion_rate: 0,\n  strategic_kpi_target: 0,\n  strategic_kpi_actual: 0,\n  // Composite & Advanced\n  operational_efficiency_index: 0,\n  maintenance_intensity: 0,\n  service_level_index: 0,\n  cost_efficiency_ratio: 0,\n  complaint_rate: 0,\n  advanced_operational_index: 0,\n  operational_health_score: 0,\n  // Modern/Holistic\n  project_budget_utilization: 0,\n  risk_level_distribution: {},\n  downtime_rate: 0,\n  // Additional\n  operational_cost_per_order: 0,\n  maintenance_cost_per_asset: 0,\n  stock_turnover_rate: 0,\n  order_cycle_time: 0,\n  project_per_store: 0,\n  initiative_per_employee: 0,\n};\n\nlet n = 0;\nlet employee_set = new Set();\nlet store_set = new Set();\nlet risk_level_count = {};\nlet downtime_sum = 0, downtime_n = 0;\nlet initiative_total = 0;\nlet project_count = 0;\nlet total_orders = 0, total_assets = 0, total_stock = 0, total_cogs = 0, total_cycle_time = 0, cycle_time_n = 0;\n\n// Per-field sum/counter for summary AVG\nlet sums = {};\nlet counts = {};\nconst fieldsToAvg = [\n  \"asset_utilization\",\"uptime_percentage\",\"order_fulfillment_rate\",\"avg_delivery_time\",\"stockout_rate\",\"shrinkage_rate\",\n  \"ess_score\",\"absent_days\",\"training_hours\",\"compensation_ratio\",\"initiative_success_rate\",\n  \"board_satisfaction\",\"stakeholder_satisfaction\",\"customer_retention_rate\",\"conversion_rate\",\"avg_transaction_value\",\n  \"profit_margin\",\"roi\",\"strategic_kpi_actual\",\"strategic_kpi_target\"\n];\nfieldsToAvg.forEach(f => { sums[f]=0; counts[f]=0; });\n\nfor (const { json: row } of items) {\n  const key = row.store_id;\n  if (!agg[key]) {\n    agg[key] = {\n      division: \"Operation\",\n      type: \"store\",\n      store_id: row.store_id,\n      region: row.region,\n      operational_cost: 0,\n      maintenance_cost: 0,\n      asset_utilization: 0,\n      uptime_percentage: 0,\n      order_fulfillment_rate: 0,\n      avg_delivery_time: 0,\n      stockout_rate: 0,\n      shrinkage_rate: 0,\n      customer_complaint_count: 0,\n      ess_score: 0,\n      absent_days: 0,\n      training_hours: 0,\n      compensation_ratio: 0,\n      campaign_count: 0,\n      initiative_count: 0,\n      initiative_success_rate: 0,\n      board_satisfaction: 0,\n      stakeholder_satisfaction: 0,\n      new_customers: 0,\n      leads_generated: 0,\n      marketing_spending: 0,\n      total_revenue: 0,\n      actual_spending: 0,\n      variable_costs: 0,\n      fixed_costs: 0,\n      actual_sales: 0,\n      avg_transaction_value: 0,\n      sales_target: 0,\n      project_budget: 0,\n      actual_cost: 0,\n      profit_margin: 0,\n      roi: 0,\n      customer_retention_rate: 0,\n      conversion_rate: 0,\n      strategic_kpi_target: 0,\n      strategic_kpi_actual: 0,\n      // will be set later:\n      operational_efficiency_index:0, maintenance_intensity:0, service_level_index:0, cost_efficiency_ratio:0, complaint_rate:0,\n      advanced_operational_index:0, operational_health_score:0, project_budget_utilization:0, downtime_rate:0\n    };\n  }\n  const a = agg[key];\n  store_set.add(row.store_id);\n\n  // SUM fields (summary + per store)\n  [\n    \"operational_cost\",\"maintenance_cost\",\"customer_complaint_count\",\"new_customers\",\"leads_generated\",\n    \"marketing_spending\",\"total_revenue\",\"actual_spending\",\"variable_costs\",\"fixed_costs\",\n    \"actual_sales\",\"campaign_count\",\"initiative_count\",\"project_budget\",\"actual_cost\",\"sales_target\"\n  ].forEach(f => {\n    if (row[f]!=null) {\n      summary[f] += row[f];\n      a[f] += row[f];\n    }\n  });\n  // AVG fields\n  fieldsToAvg.forEach(f => {\n    if (row[f]!=null && !isNaN(row[f])) {\n      sums[f] += row[f]; counts[f]++;\n      a[f] += row[f];\n      a[`${f}_n`] = (a[`${f}_n`]||0)+1;\n    }\n  });\n  // For additional metrics (counting)\n  if (row.project_id) project_count++;\n  if (row.employee_id) { employee_set.add(row.employee_id); }\n  if (row.initiative_count != null) initiative_total += row.initiative_count;\n  // Risk\n  if (row.risk_level) {\n    risk_level_count[row.risk_level] = (risk_level_count[row.risk_level]||0)+1;\n  }\n  // Downtime\n  if (row.downtime_rate!=null && !isNaN(row.downtime_rate)) { downtime_sum += row.downtime_rate; downtime_n++; }\n  // Additional operational\n  if (row.order_count!=null) total_orders += row.order_count;\n  if (row.asset_count!=null) total_assets += row.asset_count;\n  if (row.stock!=null) total_stock += row.stock;\n  if (row.cogs!=null) total_cogs += row.cogs;\n  if (row.order_cycle_time!=null && !isNaN(row.order_cycle_time)) { total_cycle_time+=row.order_cycle_time; cycle_time_n++; }\n  n++;\n}\n\n// --- 2. FLATTEN + FINALIZE FIELDS (AVG, Composite, Modern, Additional) ---\n\n// Helper: flatten & calc advanced for an object (store or summary)\nfunction finalizeKPI(obj, isSummary) {\n  // AVG\n  fieldsToAvg.forEach(f => {\n    let v = isSummary ? safeDiv(sums[f], counts[f]) : safeDiv(obj[f], obj[`${f}_n`]||1);\n    obj[f] = round(v);\n  });\n  // Composite\n  obj.operational_efficiency_index = round(safeDiv((obj.asset_utilization||0)+(obj.uptime_percentage||0)+(obj.order_fulfillment_rate||0),3));\n  obj.maintenance_intensity = round(safeDiv(obj.maintenance_cost, obj.operational_cost));\n  obj.complaint_rate = round(safeDiv(obj.customer_complaint_count, n));\n  obj.service_level_index = round(safeDiv(\n    (obj.order_fulfillment_rate||0)+(obj.customer_retention_rate||0)+(1-(obj.complaint_rate||0)),3\n  ));\n  obj.cost_efficiency_ratio = round(safeDiv(obj.total_revenue, (obj.operational_cost||0)+(obj.maintenance_cost||0)));\n  obj.advanced_operational_index = round(safeDiv(\n    (obj.operational_efficiency_index||0)+(obj.cost_efficiency_ratio||0)+(obj.service_level_index||0),3\n  ));\n  obj.operational_health_score = round(\n    (obj.advanced_operational_index||0) - ((obj.stockout_rate||0)+(obj.shrinkage_rate||0))\n  );\n  // Modern/Holistic\n  obj.project_budget_utilization = round(safeDiv(obj.actual_cost, obj.project_budget));\n  obj.downtime_rate = round(safeDiv(downtime_sum, downtime_n));\n  obj.risk_level_distribution = isSummary ? JSON.stringify(risk_level_count) : undefined;\n  // Additional\n  obj.operational_cost_per_order = safeDiv(obj.operational_cost, total_orders||n);\n  obj.maintenance_cost_per_asset = safeDiv(obj.maintenance_cost, total_assets||n);\n  obj.stock_turnover_rate = safeDiv(total_cogs, total_stock);\n  obj.order_cycle_time = round(safeDiv(total_cycle_time, cycle_time_n));\n  obj.project_per_store = safeDiv(project_count, store_set.size||1);\n  obj.initiative_per_employee = safeDiv(initiative_total, employee_set.size||1);\n  // Remove ._n fields\n  Object.keys(obj).forEach(k=>{ if (/_n$/.test(k)) delete obj[k]; });\n  return obj;\n}\n\n// --- 3. FINAL OUTPUT (summary + all stores, all flat) ---\nlet stores = Object.values(agg).map(store => finalizeKPI(store, false));\nlet summaryOut = finalizeKPI(summary, true);\n\n// Ensure order (optional, for neatness)\nconst fieldOrder = [\n  \"division\",\"type\",\"store_id\",\"region\",\n  \"operational_cost\",\"maintenance_cost\",\"asset_utilization\",\"uptime_percentage\",\"order_fulfillment_rate\",\"avg_delivery_time\",\n  \"stockout_rate\",\"shrinkage_rate\",\"customer_complaint_count\",\"ess_score\",\"absent_days\",\"training_hours\",\"compensation_ratio\",\n  \"campaign_count\",\"initiative_count\",\"initiative_success_rate\",\"board_satisfaction\",\"stakeholder_satisfaction\",\"new_customers\",\n  \"leads_generated\",\"marketing_spending\",\"total_revenue\",\"actual_spending\",\"variable_costs\",\"fixed_costs\",\"actual_sales\",\n  \"avg_transaction_value\",\"sales_target\",\"project_budget\",\"actual_cost\",\"profit_margin\",\"roi\",\"customer_retention_rate\",\n  \"conversion_rate\",\"strategic_kpi_target\",\"strategic_kpi_actual\",\n\n  // Advanced\n  \"operational_efficiency_index\",\"maintenance_intensity\",\"service_level_index\",\"cost_efficiency_ratio\",\n  \"complaint_rate\",\"advanced_operational_index\",\"operational_health_score\",\n\n  // Modern/Holistic\n  \"project_budget_utilization\",\"risk_level_distribution\",\"downtime_rate\",\n\n  // Additional\n  \"operational_cost_per_order\",\"maintenance_cost_per_asset\",\"stock_turnover_rate\",\"order_cycle_time\",\n  \"project_per_store\",\"initiative_per_employee\"\n];\n// field order helper\nfunction ensureFieldOrder(obj) {\n  let o = {};\n  fieldOrder.forEach(k => { if (obj[k]!==undefined) o[k]=obj[k]; });\n  // add any extra keys\n  Object.keys(obj).forEach(k => { if (!(k in o)) o[k]=obj[k]; });\n  return o;\n}\n\n// Compose output\nlet output = [ensureFieldOrder(summaryOut), ...stores.map(ensureFieldOrder)];\nreturn output.map(row => ({ json: row }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        340
+      ],
+      "id": "ac747a33-b575-4304-91b3-282e885dde01",
+      "name": "KPI_Sales/Marketing_Division_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "// KPI PROJECT MANAGEMENT ADVANCED ANALYSIS (n8n Code node)\n// Input: items (array) dari etl_combined_kpi.js\n// Output: summary & per store/region metrics, format supabase\n\nfunction safeDiv(a, b) { return (b && !isNaN(b) && b !== 0) ? a / b : null; }\nfunction round(val, n = 2) { return val == null ? null : Math.round(val * 10 ** n) / 10 ** n; }\n\nconst agg = {};\nconst summary = {\n  project_count: 0, completed: 0, in_progress: 0, planned: 0,\n  total_budget: 0, total_actual_cost: 0, avg_planned_roi: 0, avg_actual_roi: 0,\n  avg_issue_count: 0, avg_task_completion: 0, avg_stakeholder_satisfaction: 0,\n};\nlet sum_planned_roi = 0, sum_actual_roi = 0, sum_issue = 0, sum_task = 0, sum_satis = 0, n = 0;\n\nfor (const { json: row } of items) {\n  if (!row.project_id) continue;\n  const key = `${row.region}|${row.store_id}`;\n  if (!agg[key]) {\n    agg[key] = {\n      region: row.region, store_id: row.store_id,\n      project_count: 0, completed: 0, in_progress: 0, planned: 0,\n      total_budget: 0, total_actual_cost: 0, sum_planned_roi: 0, sum_actual_roi: 0,\n      sum_issue: 0, sum_task: 0, sum_satis: 0, n: 0,\n    };\n  }\n  const a = agg[key];\n  a.project_count++; summary.project_count++;\n  if (row.project_status && row.project_status.toLowerCase() === \"completed\") { a.completed++; summary.completed++; }\n  if (row.project_status && row.project_status.toLowerCase() === \"in progress\") { a.in_progress++; summary.in_progress++; }\n  if (row.project_status && row.project_status.toLowerCase() === \"planned\") { a.planned++; summary.planned++; }\n  a.total_budget += row.project_budget || 0; summary.total_budget += row.project_budget || 0;\n  a.total_actual_cost += row.actual_cost || 0; summary.total_actual_cost += row.actual_cost || 0;\n  if (row.planned_roi != null) { a.sum_planned_roi += row.planned_roi; sum_planned_roi += row.planned_roi; }\n  if (row.actual_roi != null) { a.sum_actual_roi += row.actual_roi; sum_actual_roi += row.actual_roi; }\n  if (row.issue_count != null) { a.sum_issue += row.issue_count; sum_issue += row.issue_count; }\n  if (row.task_completion_rate != null) { a.sum_task += row.task_completion_rate; sum_task += row.task_completion_rate; }\n  if (row.stakeholder_satisfaction != null) { a.sum_satis += row.stakeholder_satisfaction; sum_satis += row.stakeholder_satisfaction; }\n  a.n++; n++;\n}\n\nsummary.avg_planned_roi = safeDiv(sum_planned_roi, n);\nsummary.avg_actual_roi = safeDiv(sum_actual_roi, n);\nsummary.avg_issue_count = safeDiv(sum_issue, n);\nsummary.avg_task_completion = safeDiv(sum_task, n);\nsummary.avg_stakeholder_satisfaction = safeDiv(sum_satis, n);\n\nconst per_store = Object.values(agg).map(a => ({\n  region: a.region,\n  store_id: a.store_id,\n  project_count: a.project_count,\n  completed: a.completed,\n  in_progress: a.in_progress,\n  planned: a.planned,\n  total_budget: round(a.total_budget),\n  total_actual_cost: round(a.total_actual_cost),\n  avg_planned_roi: round(safeDiv(a.sum_planned_roi, a.n)),\n  avg_actual_roi: round(safeDiv(a.sum_actual_roi, a.n)),\n  avg_issue_count: round(safeDiv(a.sum_issue, a.n)),\n  avg_task_completion: round(safeDiv(a.sum_task, a.n)),\n  avg_stakeholder_satisfaction: round(safeDiv(a.sum_satis, a.n)),\n}));\n\nreturn [\n  { json: { division: \"ProjectManagement\", type: \"summary\", ...Object.fromEntries(Object.entries(summary).map(([k, v]) => [k, round(v)])) } },\n  ...per_store.map(x => ({ json: { division: \"ProjectManagement\", type: \"store\", ...x } })),\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        160
+      ],
+      "id": "a68837be-91ce-49db-bb9a-b533031c83f0",
+      "name": "KPI_Project_Management_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "jsCode": "// KPI STRATEGIC MANAGEMENT ADVANCED ANALYSIS (n8n Code node)\n// Input: items (array) dari etl_combined_kpi.js\n// Output: summary & per region metrics, format supabase\n\nfunction safeDiv(a, b) { return (b && !isNaN(b) && b !== 0) ? a / b : null; }\nfunction round(val, n = 2) { return val == null ? null : Math.round(val * 10 ** n) / 10 ** n; }\n\nconst agg = {};\nconst summary = {\n  strategy_count: 0, risk_high: 0, risk_medium: 0, risk_low: 0,\n  avg_kpi_target: 0, avg_kpi_actual: 0, avg_success_rate: 0, avg_board_satisfaction: 0,\n};\nlet sum_kpi_target = 0, sum_kpi_actual = 0, sum_success = 0, sum_bs = 0, n = 0;\n\nfor (const { json: row } of items) {\n  if (!row.strategy_id) continue;\n  const key = `${row.region}`;\n  if (!agg[key]) {\n    agg[key] = {\n      region: row.region,\n      strategy_count: 0, risk_high: 0, risk_medium: 0, risk_low: 0,\n      sum_kpi_target: 0, sum_kpi_actual: 0, sum_success: 0, sum_bs: 0, n: 0,\n    };\n  }\n  const a = agg[key];\n  a.strategy_count++; summary.strategy_count++;\n  if (row.risk_level) {\n    const r = row.risk_level.toLowerCase();\n    if (r === \"high\") { a.risk_high++; summary.risk_high++; }\n    else if (r === \"medium\") { a.risk_medium++; summary.risk_medium++; }\n    else if (r === \"low\") { a.risk_low++; summary.risk_low++; }\n  }\n  if (row.strategic_kpi_target != null) { a.sum_kpi_target += row.strategic_kpi_target; sum_kpi_target += row.strategic_kpi_target; }\n  if (row.strategic_kpi_actual != null) { a.sum_kpi_actual += row.strategic_kpi_actual; sum_kpi_actual += row.strategic_kpi_actual; }\n  if (row.initiative_success_rate != null) { a.sum_success += row.initiative_success_rate; sum_success += row.initiative_success_rate; }\n  if (row.board_satisfaction != null) { a.sum_bs += row.board_satisfaction; sum_bs += row.board_satisfaction; }\n  a.n++; n++;\n}\n\nsummary.avg_kpi_target = safeDiv(sum_kpi_target, n);\nsummary.avg_kpi_actual = safeDiv(sum_kpi_actual, n);\nsummary.avg_success_rate = safeDiv(sum_success, n);\nsummary.avg_board_satisfaction = safeDiv(sum_bs, n);\n\nconst per_region = Object.values(agg).map(a => ({\n  region: a.region,\n  strategy_count: a.strategy_count,\n  risk_high: a.risk_high,\n  risk_medium: a.risk_medium,\n  risk_low: a.risk_low,\n  avg_kpi_target: round(safeDiv(a.sum_kpi_target, a.n)),\n  avg_kpi_actual: round(safeDiv(a.sum_kpi_actual, a.n)),\n  avg_success_rate: round(safeDiv(a.sum_success, a.n)),\n  avg_board_satisfaction: round(safeDiv(a.sum_bs, a.n)),\n}));\n\nreturn [\n  { json: { division: \"StrategicManagement\", type: \"summary\", ...Object.fromEntries(Object.entries(summary).map(([k, v]) => [k, round(v)])) } },\n  ...per_region.map(x => ({ json: { division: \"StrategicManagement\", type: \"region\", ...x } })),\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        -20
+      ],
+      "id": "7132fae4-6ef6-403f-b394-2ef5a9d8da95",
+      "name": "KPI_Strategic_Management_Advanced_Analysis"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/kpifinance",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"All Data Merge\").map(item => item.json)}}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 300,
+              "batchInterval": 0
+            }
+          },
+          "response": {}
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        240
+      ],
+      "id": "bcbef986-96dd-49aa-ad9d-289d0a749dd5",
+      "name": "KPI Finance",
+      "executeOnce": true,
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/kpihr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"All Data Merge\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        440
+      ],
+      "id": "8664a2e1-fad6-498b-af9f-f724f13ee5a4",
+      "name": "KPI HR",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node Function for n8n: Calculate Financial KPIs (Enterprise Retail) + Finance Health Score + Confidence Score\n// SIAP TEMPEL, robust untuk input dari HTTP Request, Spreadsheet, dan JSON manual di n8n\n\nconst METRIC_LIST = [\n  \"total_revenue\", \"net_profit\", \"ebitda\", \"operating_profit\", \"cogs\",\n  \"gross_margin\", \"operating_margin\", \"net_profit_margin\", \"ebitda_margin\",\n  \"roi\", \"roa\", \"roe\",\n  \"profit_per_store\", \"profit_per_employee\", \"revenue_per_employee\", \"sales_per_sqm\",\n  \"inventory_turnover\", \"dio\", \"dso\", \"dpo\", \"cash_conversion_cycle\",\n  \"capex_to_sales\", \"opex_to_sales\", \"current_ratio\", \"quick_ratio\", \n  \"debt_to_equity\", \"interest_coverage\", \"free_cash_flow\",\n  \"budget_utilization\", \"budget_accuracy\", \"forecast_accuracy\",\n  \"budget_variance\", \"variance_vs_forecast\",\n  \"yoy_growth_revenue\", \"yoy_growth_profit\",\n  \"employee_count\", \"area_sqm\", \"store_count\"\n];\n\n// Helper: Ambil value dari item.json, item.json.json, atau langsung item\nfunction get(item, key, fallback = null) {\n  if (item && typeof item === \"object\") {\n    if (item.hasOwnProperty(key) && item[key] !== null && typeof item[key] !== \"undefined\") return Number(item[key]);\n    if (item.json && item.json.hasOwnProperty(key) && item.json[key] !== null && typeof item.json[key] !== \"undefined\") return Number(item.json[key]);\n    if (item.json && item.json.json && item.json.json.hasOwnProperty(key) && item.json.json[key] !== null && typeof item.json.json[key] !== \"undefined\") return Number(item.json.json[key]);\n  }\n  return fallback;\n}\n\n// Normalisasi nilai agar bisa dikomparasi (scoring)\nfunction normalize(val, min, max, reverse = false) {\n  if (max === min) return 0.5;\n  let norm = (val - min) / (max - min);\n  if (reverse) norm = 1 - norm;\n  if (isNaN(norm) || !isFinite(norm)) return 0.5;\n  return Math.max(0, Math.min(1, norm));\n}\n\n// Hitung KPI per item\nfunction calcKPIs(item) {\n  const out = {};\n  METRIC_LIST.forEach(k => out[k] = get(item, k, null));\n\n  // Derived KPIs jika belum ada\n  if ((out.gross_margin === null || isNaN(out.gross_margin)) && out.total_revenue && out.cogs)\n    out.gross_margin = (out.total_revenue - out.cogs) / out.total_revenue;\n  if ((out.net_profit_margin === null || isNaN(out.net_profit_margin)) && out.net_profit && out.total_revenue)\n    out.net_profit_margin = out.net_profit / out.total_revenue;\n  if ((out.operating_margin === null || isNaN(out.operating_margin)) && out.operating_profit && out.total_revenue)\n    out.operating_margin = out.operating_profit / out.total_revenue;\n  if ((out.ebitda_margin === null || isNaN(out.ebitda_margin)) && out.ebitda && out.total_revenue)\n    out.ebitda_margin = out.ebitda / out.total_revenue;\n  if ((out.sales_per_sqm === null || isNaN(out.sales_per_sqm)) && out.total_revenue && out.area_sqm)\n    out.sales_per_sqm = out.total_revenue / out.area_sqm;\n  if ((out.profit_per_store === null || isNaN(out.profit_per_store)) && out.net_profit && out.store_count)\n    out.profit_per_store = out.net_profit / out.store_count;\n  if ((out.profit_per_employee === null || isNaN(out.profit_per_employee)) && out.net_profit && out.employee_count)\n    out.profit_per_employee = out.net_profit / out.employee_count;\n  if ((out.revenue_per_employee === null || isNaN(out.revenue_per_employee)) && out.total_revenue && out.employee_count)\n    out.revenue_per_employee = out.total_revenue / out.employee_count;\n\n  [\n    \"gross_margin\", \"net_profit_margin\", \"operating_margin\", \"ebitda_margin\", \n    \"budget_utilization\", \"budget_accuracy\", \"forecast_accuracy\"\n  ].forEach(k => { if (out[k] !== null && !isNaN(out[k])) out[k] = Math.max(0, Math.min(1, out[k])); });\n\n  return out;\n}\n\n// Bobot scoring (total 1)\nconst SCORE_WEIGHTS = {\n  net_profit_margin: 0.08,\n  operating_margin: 0.05,\n  ebitda_margin: 0.05,\n  gross_margin: 0.07,\n  current_ratio: 0.06,\n  quick_ratio: 0.04,\n  debt_to_equity: 0.07,\n  interest_coverage: 0.05,\n  inventory_turnover: 0.05,\n  cash_conversion_cycle: 0.05,\n  budget_utilization: 0.03,\n  roi: 0.04,\n  roa: 0.03,\n  roe: 0.03,\n  sales_per_sqm: 0.04,\n  profit_per_employee: 0.03,\n  revenue_per_employee: 0.03,\n  yoy_growth_revenue: 0.05,\n  yoy_growth_profit: 0.05,\n  free_cash_flow: 0.05,\n  forecast_accuracy: 0.03,\n  budget_accuracy: 0.02,\n};\n\nconst METRIC_BENCHMARKS = {\n  net_profit_margin: { min: 0.01, max: 0.2 },\n  operating_margin: { min: 0.01, max: 0.15 },\n  ebitda_margin: { min: 0.05, max: 0.25 },\n  gross_margin: { min: 0.1, max: 0.6 },\n  current_ratio: { min: 0.8, max: 3 },\n  quick_ratio: { min: 0.6, max: 2.5 },\n  debt_to_equity: { min: 0, max: 2 },\n  interest_coverage: { min: 1.5, max: 20 },\n  inventory_turnover: { min: 2, max: 100 },\n  cash_conversion_cycle: { min: 0, max: 100 },\n  roi: { min: 0.01, max: 0.5 },\n  roa: { min: 0.01, max: 0.3 },\n  roe: { min: 0.01, max: 0.5 },\n  sales_per_sqm: { min: 100000, max: 10000000 },\n  profit_per_employee: { min: 1000000, max: 200000000 },\n  revenue_per_employee: { min: 10000000, max: 500000000 },\n  yoy_growth_revenue: { min: -0.05, max: 0.2 },\n  yoy_growth_profit: { min: -0.05, max: 0.2 },\n  free_cash_flow: { min: 0, max: 200000000 },\n  forecast_accuracy: { min: 0.8, max: 1 },\n  budget_accuracy: { min: 0.8, max: 1 },\n  budget_utilization: { min: 0.7, max: 1 },\n};\n\nconst REVERSE_METRIC = [\n  \"debt_to_equity\", \"cash_conversion_cycle\"\n];\n\n// Hitung skor kesehatan finansial (null jika tidak ada metrik valid)\nfunction calcFinanceHealthScore(kpi) {\n  let totalScore = 0;\n  let totalWeight = 0;\n  for (const [metric, weight] of Object.entries(SCORE_WEIGHTS)) {\n    let val = kpi[metric];\n    if (val === null || typeof val === 'undefined' || isNaN(val)) continue;\n    const { min, max } = METRIC_BENCHMARKS[metric] || { min: 0, max: 1 };\n    const reverse = REVERSE_METRIC.includes(metric);\n    let score = normalize(val, min, max, reverse);\n    totalScore += score * weight;\n    totalWeight += weight;\n  }\n  return totalWeight > 0 ? +(totalScore / totalWeight).toFixed(3) : null;\n}\n\n/**\n * Kalkulasi confidence_score\n * Skor 0..1, mendeteksi kelengkapan data, validitas, outlier/anomali, dan proses kalkulasi\n * Penilaian aspek:\n * 1. Kualitas/kelengkapan/validitas/akurasi proses data dalam node function\n * 2. Kualitas/kelengkapan/validitas/akurasi kode node function\n * 3. Kualitas/kelengkapan/validitas/akurasi logika kalkulasi kode\n * 4. Kualitas/kelengkapan/validitas/akurasi input data\n * 5. Kualitas/kelengkapan/validitas/akurasi output data\n */\nfunction calcConfidenceScore(item, kpi) {\n  // 1. Cek kelengkapan input data\n  const input_fields = METRIC_LIST.length;\n  let input_filled = 0;\n  METRIC_LIST.forEach(k => {\n    let v = get(item, k, null);\n    if (v !== null && !isNaN(v)) input_filled++;\n  });\n  const input_score = input_filled / input_fields;\n\n  // 2. Cek kelengkapan output KPI (apakah hasil kalkulasi terisi, bukan null semua)\n  const output_fields = METRIC_LIST.length;\n  let output_filled = 0;\n  METRIC_LIST.forEach(k => {\n    if (kpi[k] !== null && !isNaN(kpi[k])) output_filled++;\n  });\n  const output_score = output_filled / output_fields;\n\n  // 3. Validitas/akurasi input: deteksi outlier/anomali sederhana (misal: margin di luar -1..2, rasio negatif, dsb)\n  let anomaly_count = 0, checked = 0;\n  [\n    \"gross_margin\",\"net_profit_margin\",\"operating_margin\",\"ebitda_margin\"\n  ].forEach(k => {\n    if (kpi[k] !== null && (kpi[k] < -1 || kpi[k] > 2)) anomaly_count++;\n    if (kpi[k] !== null) checked++;\n  });\n  [\"current_ratio\", \"quick_ratio\"].forEach(k => {\n    if (kpi[k] !== null && kpi[k] < 0) anomaly_count++;\n    if (kpi[k] !== null) checked++;\n  });\n  let anomaly_score = checked > 0 ? 1 - (anomaly_count / checked) : 1;\n\n  // 4. Validitas proses & logika kode (karena kode sudah best practice, asumsikan bobot tinggi, tapi turunkan jika output/input buruk)\n  let logic_score = 1;\n  if (input_score < 0.3 || output_score < 0.3) logic_score = 0.4;\n  else if (input_score < 0.7 || output_score < 0.7) logic_score = 0.7;\n\n  // 5. Penilaian proses node function (karena kode best practice, bobot tinggi, turunkan jika anomaly)\n  let process_score = anomaly_score > 0.8 ? 1 : (anomaly_score > 0.5 ? 0.7 : 0.4);\n\n  // Kombinasi bobot, proporsional & fair\n  // Input: 25%, Output: 25%, Anomali/validitas: 20%, Logika: 15%, Proses: 15%\n  const confidence_score = (\n    input_score * 0.25 +\n    output_score * 0.25 +\n    anomaly_score * 0.2 +\n    logic_score * 0.15 +\n    process_score * 0.15\n  );\n\n  return +confidence_score.toFixed(3);\n}\n\n// === PATCH: Robust input unwrapping for n8n/HTTP/Spreadsheet ===\nlet rows = [];\nif (Array.isArray(items) && items[0] && items[0].json && Array.isArray(items[0].json.result)) {\n  // HTTP result dari backend: [{json:{result:[ ... ]}}]\n  rows = items[0].json.result;\n} else if (Array.isArray(items) && items[0] && items[0].json && !Array.isArray(items[0].json.result)) {\n  // Spreadsheet/JSON manual: [{json:{...}}]\n  rows = items.map(i => i.json);\n} else if (Array.isArray(items)) {\n  // Sudah array of object\n  rows = items;\n}\n\n// Output: 1 row summary, sisanya per store\nreturn rows.map((item, idx) => {\n  const kpi = calcKPIs(item);\n\n  // === Tambahkan kolom \"type\" di urutan paling awal sesuai urutan item ===\n  let typeValue = null;\n  if (idx === 0) typeValue = \"Summary\";\n  else if (idx > 0) typeValue = \"ST\" + String(idx).padStart(2, \"0\");\n\n  kpi.finance_health_score = calcFinanceHealthScore(kpi);\n  // Confidence score\n  kpi.confidence_score = calcConfidenceScore(item, kpi);\n\n  // Letakkan \"type\" di urutan paling awal\n  return { json: Object.assign({ type: typeValue }, kpi) };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        700
+      ],
+      "id": "1700b438-ea4c-493a-857b-6368dd6566aa",
+      "name": "Financial Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// === HUMAN CAPITAL REPORT: Executive Summary & 4 Stores ===\n// Valid, robust, fair, and accurate for enterprise HR analytics & reporting in n8n Code node\n\nconst METRIC_LIST = [\n  // Workforce Overview\n  \"total_employee_count\", \"gender_ratio\", \"diversity_index_gender\", \"diversity_index_generation\", \"diversity_index_education\",\n  // Talent Flow\n  \"new_hire_rate\", \"turnover_rate\", \"voluntary_turnover_rate\", \"internal_mobility_rate\", \"promotion_rate\", \"time_to_fill\", \"average_tenure\",\n  // Learning & Performance\n  \"average_training_hours_per_employee\", \"pct_employees_with_certification\", \"pct_high_performers\", \"productivity_score\", \"employee_engagement_score\",\n  // Productivity & Cost Efficiency\n  \"productivity_per_employee\", \"sales_per_employee\", \"payroll_to_revenue_ratio\", \"hr_cost_as_pct_of_revenue\", \"compensation_ratio\",\n  // Engagement & Wellbeing\n  \"employee_nps\", \"absenteeism_rate\", \"disciplinary_action_rate\", \"union_membership_pct\",\n  // Human Capital Value\n  \"human_capital_roi\", \"employee_lifetime_value\", \"cost_per_hire\",\n  // Projects & Involvement\n  \"pct_employees_involved_in_projects\", \"project_success_rate\",\n  // Risk & Analytics\n  \"turnover_risk_prediction\", \"confidence_score\"\n];\n\n// Helper: Auto-detect nested input for n8n HTTP node\nfunction get(item, key, fallback = null) {\n  if (item.json && item.json.json && typeof item.json.json[key] !== 'undefined' && item.json.json[key] !== null) return item.json.json[key];\n  if (item.json && typeof item.json[key] !== 'undefined' && item.json[key] !== null) return item.json[key];\n  if (typeof item[key] !== 'undefined' && item[key] !== null) return item[key];\n  return fallback;\n}\n\n// Helper: Calculate mean, sum, and unique count robustly\nfunction mean(arr) {\n  arr = arr.filter(x => typeof x === \"number\" && !isNaN(x));\n  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;\n}\nfunction sum(arr) {\n  return arr.filter(x => typeof x === \"number\" && !isNaN(x)).reduce((a, b) => a + b, 0);\n}\nfunction countUnique(arr) {\n  return Array.isArray(arr) ? new Set(arr.filter(x => x !== undefined && x !== null && x !== \"\")).size : 0;\n}\n\n// Helper: Robust confidence score with anomaly detection\nfunction confidenceScore(kpi, metricList = METRIC_LIST) {\n  let filled = 0, valid = 0;\n  for (const key of metricList) {\n    const v = kpi[key];\n    if (v !== null && v !== undefined && v !== \"\" && !Number.isNaN(v)) {\n      filled++;\n      if (\n        (typeof v === \"number\" && !isNaN(v) && isFinite(v)\n          && (key.indexOf(\"rate\") > -1 || key.indexOf(\"ratio\") > -1\n            ? v >= 0 && v <= 1.5\n            : true)\n        ) ||\n        (typeof v === \"string\" && v.trim() !== \"\")\n      ) {\n        valid++;\n      }\n    }\n  }\n  // If >25% null, confidence low; if any value is outlier (NaN, inf, negative for count), confidence low\n  let completeness = filled / metricList.length;\n  let validity = valid / metricList.length;\n  let conf = completeness * validity;\n  // Penalize very low sample size or obvious anomalies\n  if (kpi.total_employee_count !== undefined && kpi.total_employee_count < 3) conf *= 0.5;\n  if (completeness < 0.75) conf *= completeness;\n  // Outlier detection: if >2 metrics are NaN/inf/very negative, set conf lower\n  let anomaly = 0;\n  for (const key of metricList) {\n    const v = kpi[key];\n    if (typeof v === \"number\" && (isNaN(v) || !isFinite(v) || (key.indexOf(\"count\") > -1 && v < 0))) anomaly++;\n  }\n  if (anomaly >= 2) conf *= 0.8;\n  conf = Math.max(0, Math.min(1, +conf.toFixed(3)));\n  return conf;\n}\n\n// Helper: Diversity index (Simpson's Index)\nfunction diversityIndex(arr) {\n  const counts = {};\n  arr.forEach(x => {\n    if (x) counts[x] = (counts[x] || 0) + 1;\n  });\n  const n = arr.length;\n  if (!n) return null;\n  let s = 0;\n  for (const k in counts) {\n    const p = counts[k] / n;\n    s += p * p;\n  }\n  return +(1 - s).toFixed(3);\n}\n\n// Main KPI extractor from input (array of items for each store/summary)\nfunction calcKPIs(item) {\n  const kpi = {};\n  for (const key of METRIC_LIST) {\n    // Read as number (or string for diversity index)\n    let val = get(item, key, null);\n    if (key.startsWith(\"diversity_index\")) val = get(item, key, null); // can be float or string\n    if (key === \"confidence_score\") continue; // calculated at the end\n    kpi[key] = val !== undefined ? val : null;\n  }\n  // Calculate confidence score last (after all value normalized)\n  kpi.confidence_score = confidenceScore(kpi, METRIC_LIST);\n  return kpi;\n}\n\n// Main function: expects array of items (from HTTP node)\nfunction humanCapitalReport(items) {\n  // Normalize: support n8n HTTP, n8n item, or plain object\n  function normalizeInputItem(item) {\n    // Flatten .json.json if exists\n    return item.json && item.json.json ? item.json.json : (item.json ? item.json : item);\n  }\n  // Filter for each store\n  const all = items.map(normalizeInputItem);\n\n  // 1 summary\n  const summary = all.find(x => x.type === \"summary\" || x.store_id === \"ST00\" || x.region === \"Indonesia\") || all[0];\n  // 4 store\n  const STORES = [\n    { store_id: \"ST01\", region: \"Jakarta\" },\n    { store_id: \"ST02\", region: \"Bandung\" },\n    { store_id: \"ST04\", region: \"Medan\" },\n    { store_id: \"ST03\", region: \"Surabaya\" },\n  ];\n  const stores = STORES.map(\n    s => all.find(x => x.store_id === s.store_id && x.region === s.region)\n      || all.find(x => x.region === s.region)\n      || all.find(x => x.store_id === s.store_id)\n      || {}\n  );\n  // Output: summary + each store, as array of {json: ...}\n  return [\n    { json: calcKPIs(summary) },\n    ...stores.map(store => ({ json: calcKPIs(store) }))\n  ];\n}\n\n// n8n expects you to return the result directly\nreturn humanCapitalReport(items);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        440
+      ],
+      "id": "e3a6e0b2-1d39-4096-bb9a-bb1739feadf1",
+      "name": "Human Capital Report"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/etlcombinationkpi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"All Data Merge\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        100,
+        340
+      ],
+      "id": "64fcd95b-b783-4fca-ac2a-ccfd3f3b5d67",
+      "name": "ETL Combination KPI",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        500
+      ],
+      "id": "3bfae46c-756c-4139-923d-abdd67954cd5",
+      "name": "Sales & Marketing Performance Report"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/etl-kpi-hr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"Merge Frontend Data 1\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        260
+      ],
+      "id": "83889915-6298-4bae-894d-88f7e629d514",
+      "name": "KPI Sales/Marketing",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/etl-kpi-hr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"Merge Frontend Data 1\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        120
+      ],
+      "id": "2d05ec5e-176f-4394-9a7b-7077e3b0fcb8",
+      "name": "KPI Operation",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/etl-kpi-hr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"Merge Frontend Data 1\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2760,
+        160
+      ],
+      "id": "fc52f724-08a5-42b6-b834-d88767db5325",
+      "name": "KPI Project Management",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/etl-kpi-hr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"Merge Frontend Data 1\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        -100
+      ],
+      "id": "52f3b16b-7db9-4636-966b-029884f4f0ca",
+      "name": "KPI Strategic Management",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        800
+      ],
+      "id": "976b0b2f-7a7c-4aa9-9993-315cba709e70",
+      "name": "Project Health Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        720
+      ],
+      "id": "66e8182f-b340-4f68-a107-1c5c6064e692",
+      "name": "Operational Health Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        980
+      ],
+      "id": "64e16dae-1f8e-4b67-b81e-e533a9dec7dc",
+      "name": "Balanced Scorecard Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2360,
+        580
+      ],
+      "id": "ffdb9b37-d424-49b5-b57c-867afffc6801",
+      "name": "Audit & Monitoring Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8aa9b278-581a-4681-873b-f9e7c4cc4756",
+              "leftValue": "=[\"excellent\",\"very good\",\"good\"].includes($json[\"data_classification\"]?.toLowerCase())",
+              "rightValue": "=true",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        460
+      ],
+      "id": "a81be546-1009-41a7-b10d-9dffe8f94b13",
+      "name": "If Finance Data Qualified"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ganti \"KPI Finance\" dengan nama node HTTP Request KPI Finance Anda!\nreturn $items(\"KPI Finance\");"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        580
+      ],
+      "id": "30ac0c98-b3a6-4ec6-9b6f-8dba8d68a60c",
+      "name": "Finance True Data Qualified"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Node Function Dokumentasi Output False Branch IF (Audit ETL + Audit Finance)\n * Adaptif, otomatis deteksi asal data (Finance Audit Function/ETL Audit Function), \n * dan dokumentasikan penyebab gagal (\"false\") dengan metrik-metrik utama dari masing-masing input.\n * \n * Input: items dari False Branch IF (gabungan Finance Audit Function + ETL Audit Function)\n * Output: Dokumentasi array dengan asal, metrik ringkasan, dan penyebab utama gagal (best practice bisnis)\n */\n\nfunction detectSource(item) {\n  // Deteksi asal data dan mapping metrik utama\n  if (item.json && typeof item.json === \"object\") {\n    // Finance Audit Function detection\n    if (\n      Object.prototype.hasOwnProperty.call(item.json, \"avg_completeness_etl\") &&\n      Object.prototype.hasOwnProperty.call(item.json, \"avg_confidence_score_etl\") &&\n      Object.prototype.hasOwnProperty.call(item.json, \"data_classification\")\n    ) {\n      return \"Finance Audit Function\";\n    }\n    // ETL Audit Function detection\n    if (\n      Object.prototype.hasOwnProperty.call(item.json, \"avg_completeness_etl\") &&\n      Object.prototype.hasOwnProperty.call(item.json, \"avg_confidence_score_etl\") &&\n      Object.prototype.hasOwnProperty.call(item.json, \"data_classification\")\n    ) {\n      // Could be both (struktur mirip), tambahkan pembeda jika ada\n      // Jika ada field lain yang unik pada ETL Audit Function, bisa tambahkan deteksi di sini\n      // Misal: jika ada field \"sample_content\" di metadata, tapi tidak di finance, gunakan itu\n      if (\n        item.json.metadata && Array.isArray(item.json.metadata.sample_content)\n      ) {\n        return \"ETL Audit Function\";\n      }\n      // Fallback: jika id diawali 'etl_audit_' → ETL audit\n      if (\n        typeof item.json.id === \"string\" &&\n        item.json.id.startsWith(\"etl_audit_\")\n      ) {\n        return \"ETL Audit Function\";\n      }\n      // Fallback: jika id diawali 'finance_audit_' → Finance audit\n      if (\n        typeof item.json.id === \"string\" &&\n        item.json.id.startsWith(\"finance_audit_\")\n      ) {\n        return \"Finance Audit Function\";\n      }\n    }\n  }\n  return \"Unknown Source\";\n}\n\n// Metrik kunci untuk dokumentasi, menyesuaikan best practice bisnis\nfunction extractMetrics(item, source) {\n  const j = item.json;\n  const metrics = {};\n  // Finance Audit Function\n  if (source === \"Finance Audit Function\") {\n    metrics.avg_completeness_etl = j.avg_completeness_etl;\n    metrics.avg_confidence_score_etl = j.avg_confidence_score_etl;\n    metrics.avg_completeness_audit = j.avg_completeness_audit;\n    metrics.avg_confidence_score_audit = j.avg_confidence_score_audit;\n    metrics.data_quality_score = j.data_quality_score;\n    metrics.data_classification = j.data_classification;\n    metrics.data_classification_score = j.data_classification_score;\n    metrics.completeness_gap = j.completeness_gap;\n    metrics.confidence_gap = j.confidence_gap;\n    metrics.anomaly_reason = j.anomaly_reason;\n    metrics.count_critical_missing = j.count_critical_missing;\n    metrics.count_anomaly = j.count_anomaly;\n    metrics.division_stats = j.division_stats;\n    metrics.data_tracing = j.data_tracing;\n    metrics.etl_optimization = j.etl_optimization;\n    metrics.id = j.id;\n  }\n  // ETL Audit Function\n  else if (source === \"ETL Audit Function\") {\n    metrics.avg_completeness_etl = j.avg_completeness_etl;\n    metrics.avg_confidence_score_etl = j.avg_confidence_score_etl;\n    metrics.avg_completeness_audit = j.avg_completeness_audit;\n    metrics.avg_confidence_score_audit = j.avg_confidence_score_audit;\n    metrics.data_quality_score = j.data_quality_score;\n    metrics.data_classification = j.data_classification;\n    metrics.data_classification_score = j.data_classification_score;\n    metrics.completeness_gap = j.completeness_gap;\n    metrics.confidence_gap = j.confidence_gap;\n    metrics.anomaly_reason = j.anomaly_reason;\n    metrics.count_critical_missing = j.count_critical_missing;\n    metrics.count_anomaly = j.count_anomaly;\n    metrics.data_tracing = j.data_tracing;\n    metrics.id = j.id;\n  }\n  // Unknown (fallback)\n  else {\n    Object.assign(metrics, j);\n  }\n  return metrics;\n}\n\n// Penjelasan penyebab false (gagal lolos IF), ringkasan best practice bisnis\nfunction getFailureReason(metrics, source) {\n  let reasons = [];\n  if (\n    metrics.data_classification &&\n    [\"bad\", \"very bad\"].includes(\n      String(metrics.data_classification).toLowerCase()\n    )\n  ) {\n    reasons.push(\n      `Kualitas data \"${metrics.data_classification}\" tidak memenuhi standar minimum (\"good\"/\"very good\"/\"excellent\").`\n    );\n  }\n  if (\n    typeof metrics.data_quality_score === \"number\" &&\n    metrics.data_quality_score < 70\n  ) {\n    reasons.push(\"Data quality score rendah.\");\n  }\n  if (\n    typeof metrics.avg_completeness_etl === \"number\" &&\n    metrics.avg_completeness_etl < 75\n  ) {\n    reasons.push(\"Completeness ETL di bawah 75%.\");\n  }\n  if (\n    typeof metrics.avg_confidence_score_etl === \"number\" &&\n    metrics.avg_confidence_score_etl < 0.75\n  ) {\n    reasons.push(\"Confidence ETL di bawah 0.75.\");\n  }\n  if (\n    typeof metrics.avg_completeness_audit === \"number\" &&\n    metrics.avg_completeness_audit < 75\n  ) {\n    reasons.push(\"Completeness audit di bawah 75%.\");\n  }\n  if (\n    typeof metrics.avg_confidence_score_audit === \"number\" &&\n    metrics.avg_confidence_score_audit < 0.75\n  ) {\n    reasons.push(\"Confidence audit di bawah 0.75.\");\n  }\n  if (\n    typeof metrics.completeness_gap === \"number\" &&\n    metrics.completeness_gap > 5\n  ) {\n    reasons.push(\"Gap completeness ETL vs audit terlalu besar.\");\n  }\n  if (\n    typeof metrics.confidence_gap === \"number\" &&\n    metrics.confidence_gap > 0.05\n  ) {\n    reasons.push(\"Gap confidence ETL vs audit terlalu besar.\");\n  }\n  if (\n    typeof metrics.count_critical_missing === \"number\" &&\n    metrics.count_critical_missing > 0\n  ) {\n    reasons.push(\"Ada field critical hilang.\");\n  }\n  if (\n    typeof metrics.count_anomaly === \"number\" &&\n    metrics.count_anomaly > 0\n  ) {\n    reasons.push(\"Ada data anomaly.\");\n  }\n  if (\n    Array.isArray(metrics.anomaly_reason) &&\n    metrics.anomaly_reason.length > 0\n  ) {\n    reasons.push(\"Anomali terdeteksi: \" + metrics.anomaly_reason.join(\"; \"));\n  }\n  if (metrics.data_tracing) {\n    reasons.push(\"Tracing: \" + metrics.data_tracing);\n  }\n  // ETL optimization/rekomendasi (hanya jika relevan)\n  if (metrics.etl_optimization) {\n    reasons.push(\"Rekomendasi perbaikan: \" + metrics.etl_optimization);\n  }\n  return reasons.filter(Boolean).join(\" \");\n}\n\n// Main logic\nreturn items.map(item => {\n  const source = detectSource(item);\n  const metrics = extractMetrics(item, source);\n  const failure_reason = getFailureReason(metrics, source);\n  return {\n    json: {\n      id: metrics.id,\n      source,\n      data_classification: metrics.data_classification,\n      data_classification_score: metrics.data_classification_score,\n      data_quality_score: metrics.data_quality_score,\n      avg_completeness_etl: metrics.avg_completeness_etl,\n      avg_confidence_score_etl: metrics.avg_confidence_score_etl,\n      avg_completeness_audit: metrics.avg_completeness_audit,\n      avg_confidence_score_audit: metrics.avg_confidence_score_audit,\n      completeness_gap: metrics.completeness_gap,\n      confidence_gap: metrics.confidence_gap,\n      anomaly_reason: metrics.anomaly_reason,\n      count_critical_missing: metrics.count_critical_missing,\n      count_anomaly: metrics.count_anomaly,\n      division_stats: metrics.division_stats,\n      data_tracing: metrics.data_tracing,\n      etl_optimization: metrics.etl_optimization,\n      failure_reason // penjelasan utama kenapa gagal lolos IF\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        580
+      ],
+      "id": "e9cffb4b-ee53-4611-a872-8e609796d800",
+      "name": "Finance False Documentation"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1Uz_bzp-MzafhGk4zwCHN84TT-uCInHmcn5ScnkM0Kq0/edit?usp=sharing",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Financial_Report",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Uz_bzp-MzafhGk4zwCHN84TT-uCInHmcn5ScnkM0Kq0/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "type"
+          ],
+          "schema": [
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total_revenue",
+              "displayName": "total_revenue",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "net_profit",
+              "displayName": "net_profit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ebitda",
+              "displayName": "ebitda",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operating_profit",
+              "displayName": "operating_profit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cogs",
+              "displayName": "cogs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "gross_margin",
+              "displayName": "gross_margin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operating_margin",
+              "displayName": "operating_margin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "net_profit_margin",
+              "displayName": "net_profit_margin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ebitda_margin",
+              "displayName": "ebitda_margin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "roi",
+              "displayName": "roi",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "roa",
+              "displayName": "roa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "roe",
+              "displayName": "roe",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profit_per_store",
+              "displayName": "profit_per_store",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profit_per_employee",
+              "displayName": "profit_per_employee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "revenue_per_employee",
+              "displayName": "revenue_per_employee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sales_per_sqm",
+              "displayName": "sales_per_sqm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "inventory_turnover",
+              "displayName": "inventory_turnover",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "dio",
+              "displayName": "dio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "dso",
+              "displayName": "dso",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "dpo",
+              "displayName": "dpo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cash_conversion_cycle",
+              "displayName": "cash_conversion_cycle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "capex_to_sales",
+              "displayName": "capex_to_sales",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "opex_to_sales",
+              "displayName": "opex_to_sales",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "current_ratio",
+              "displayName": "current_ratio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "quick_ratio",
+              "displayName": "quick_ratio",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "debt_to_equity",
+              "displayName": "debt_to_equity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "interest_coverage",
+              "displayName": "interest_coverage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "free_cash_flow",
+              "displayName": "free_cash_flow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "budget_utilization",
+              "displayName": "budget_utilization",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "budget_accuracy",
+              "displayName": "budget_accuracy",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "forecast_accuracy",
+              "displayName": "forecast_accuracy",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "budget_variance",
+              "displayName": "budget_variance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "variance_vs_forecast",
+              "displayName": "variance_vs_forecast",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "yoy_growth_revenue",
+              "displayName": "yoy_growth_revenue",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "yoy_growth_profit",
+              "displayName": "yoy_growth_profit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "employee_count",
+              "displayName": "employee_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "area_sqm",
+              "displayName": "area_sqm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "store_count",
+              "displayName": "store_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "finance_health_score",
+              "displayName": "finance_health_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "confidence_score",
+              "displayName": "confidence_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        700
+      ],
+      "id": "deb79a59-a441-41e9-b115-07ace7508487",
+      "name": "GSheet Financial Report",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "4fhYQhivfYqOJsQw",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        780,
+        460
+      ],
+      "id": "506e732d-45c5-4790-a7a0-4761bee7f4b5",
+      "name": "Finance Merge"
+    },
+    {
+      "parameters": {
+        "content": "                                              All Data Input",
+        "height": 1100,
+        "width": 900,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1900,
+        120
+      ],
+      "id": "9b3ef008-15fa-4083-86f2-6cda408c5141",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "                            ETL Data Processing",
+        "height": 1160,
+        "width": 640,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -120,
+        140
+      ],
+      "id": "1264d6aa-edf2-4542-bbb0-59298e12d473",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "                            Finance Data Processing",
+        "height": 1160,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        560,
+        140
+      ],
+      "id": "c84542a7-b30f-4939-9ab5-8061cf8a51db",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "                            HR Data Processing",
+        "height": 1160,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        140
+      ],
+      "id": "24e55239-ea5b-4f6a-b1bf-b380806d072b",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/etlauditfunction",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"All Data Merge\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        480
+      ],
+      "id": "a4779ecb-93cc-4d22-b5b8-b9e83a077977",
+      "name": "ETL Audit Function",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/financeauditfunction",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$items(\"KPI Finance\").map(item => item.json)}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        340
+      ],
+      "id": "608f3004-f714-47ac-af0e-210fbed595d9",
+      "name": "Finance Audit Function",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "http://127.0.0.1:8000/all_data_merge",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "15000"
+            },
+            {
+              "name": "offset",
+              "value": "={{$runIndex * 15000}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1660,
+        400
+      ],
+      "id": "fe980613-54ae-4467-bdf0-855797d36b93",
+      "name": "All Backend Data",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c",
+          "mode": "list",
+          "cachedResultName": "Offset Data",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Offset Data",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "row_number": "={{$json[\"row_number\"]}}",
+            "frontend_offset": "={{$json[\"frontend_offset\"]}}",
+            "backend_offset": "={{$json[\"backend_offset\"]}}",
+            "cycle": "={{$json[\"cycle\"]}}"
+          },
+          "matchingColumns": [
+            "row_number"
+          ],
+          "schema": [
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cycle",
+              "displayName": "cycle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "frontend_offset",
+              "displayName": "frontend_offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "backend_offset",
+              "displayName": "backend_offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        1360,
+        1360
+      ],
+      "id": "9d1bf49a-30dc-476c-a5e5-45038eb9ec9f",
+      "name": "Post Offset Data",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c",
+          "mode": "list",
+          "cachedResultName": "Offset Data",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Offset Data",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1hNXeiO8KMO4pTmuc1F1XdPFAT0k6KbZtTgXTjIoMG7c/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        1200,
+        1480
+      ],
+      "id": "2d422037-673a-4a4a-a185-d5f80c527d8a",
+      "name": "Backend Offset Data",
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ambil offset lama dari input utama (hasil offset merge, misal dari sheet)\nconst frontend_offset_lama = $json.frontend_offset ?? 0;\nconst backend_offset_lama  = $json.backend_offset  ?? 0;\nconst row_number = $json.row_number ?? 1;\nconst cycle_lama = $json.cycle ?? 0;\n\n// Ambil data batch dari node lain (gunakan nama node persis sesuai workflow)\nconst frontend_items = $items(\"All Frontend Data\") ?? [];\nconst backend_items  = $items(\"All Backend Data\") ?? [];\n\n// Ambil summary/merge dari node dokumentasi (data merge) untuk summary size\nconst mergeDocs = $items(\"Size Data Merge\") ?? [];\n\n// Helper untuk cari nilai summary berdasarkan file\nfunction findSummaryValue(arr, fileLabel, key) {\n  // Cari pada root atau .json (untuk kompatibilitas n8n lama/baru)\n  const found = arr.find(\n    doc => ((doc.json?.file ?? doc.file ?? \"\").toLowerCase().replace(/\\s+/g, '') === fileLabel.toLowerCase().replace(/\\s+/g, ''))\n  );\n  return (found && (found.json?.[key] ?? found[key])) ?? null;\n}\n\n// Ambil size_bytes dari summary frontend/backend\nconst frontend_batch_size = findSummaryValue(mergeDocs, \"All Frontend Data\", \"size_bytes\");\n\n// --- REVISI BACKEND_BATCH_SIZE ---\n// Otomatis deteksi backend: jumlahkan semua size_bytes dari mergeDocs yang file BUKAN \"All Frontend Data\"\nconst backend_batch_size = mergeDocs\n  .filter(\n    doc => ((doc.json?.file ?? doc.file ?? \"\").toLowerCase().replace(/\\s+/g, '') !== \"allfrontenddata\")\n  )\n  .reduce(\n    (sum, doc) => sum + (doc.json?.size_bytes ?? doc.size_bytes ?? 0), 0\n  );\n\n// Ambil jumlah data aktual yang diproses (dari batch ini, selalu .length per batch)\nconst frontend_data_count = frontend_items.length;\nconst backend_data_count  = backend_items.length;\n\n// Offset SELALU bertambah sesuai jumlah data yang benar-benar diproses pada batch ini\nfunction nextOffset(oldOffset, dataCount) {\n  if (dataCount > 0) {\n    return oldOffset + dataCount;\n  }\n  return oldOffset;\n}\n\n// Output offset baru, info cycle bertambah setiap proses\nreturn [{\n  json: {\n    row_number: row_number + 1,\n    cycle: cycle_lama + 1,\n    frontend_offset: nextOffset(frontend_offset_lama, frontend_data_count),\n    backend_offset: nextOffset(backend_offset_lama, backend_data_count),\n    frontend_data_count,\n    backend_data_count,\n    frontend_batch_size,\n    backend_batch_size\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        1420
+      ],
+      "id": "1ac5a3b5-a54c-425c-984c-f094a3085187",
+      "name": "All Offset Function"
+    },
+    {
+      "parameters": {
+        "url": "http://127.0.0.1:8000/all_data_audit",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1240,
+        400
+      ],
+      "id": "626c5987-db0d-4e9e-b939-8337af00ce38",
+      "name": "Backend Data Documentation"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        1400,
+        1560
+      ],
+      "id": "3d594d73-eba6-4b46-8bbc-defe927ec360",
+      "name": "Size Data Merge"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2140,
+        840
+      ],
+      "id": "f1dcf572-7bda-40f7-83bd-0b9ee53716f3",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1800,
+        400
+      ],
+      "id": "80f4411e-84cc-47fc-8e63-e765bbe3d4ce",
+      "name": "Empty Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/sync_after_batch",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        20,
+        80
+      ],
+      "id": "8e60c9f1-766f-4ff7-97fe-4a39dee33b69",
+      "name": "Sync After Batch"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1980247183,
+          "mode": "list",
+          "cachedResultName": "DW_Finance",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=1980247183"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        820
+      ],
+      "id": "7b567546-6da0-48d7-990b-39dc7c568202",
+      "name": "DW_Finance",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2066828751,
+          "mode": "list",
+          "cachedResultName": "DW_HR",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=2066828751"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        700
+      ],
+      "id": "69ad10bb-c309-47d4-a250-85734d1f3b96",
+      "name": "DW_HR",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1421894444,
+          "mode": "list",
+          "cachedResultName": "DW_Sales/Marketing",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=1421894444"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        580
+      ],
+      "id": "ae7d2479-5008-4dab-ab38-7072d65e3695",
+      "name": "DW_Sales/Marketing",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 775363359,
+          "mode": "list",
+          "cachedResultName": "DW_Operation",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=775363359"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        460
+      ],
+      "id": "67512b81-3fc8-4610-bab5-264c0a9a8ec8",
+      "name": "DW_Operation",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 988310473,
+          "mode": "list",
+          "cachedResultName": "DW_Project_Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=988310473"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        340
+      ],
+      "id": "e91aa9a6-c1c0-4813-821f-71d9eca46007",
+      "name": "DW_Project_Management",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA",
+          "mode": "list",
+          "cachedResultName": "Data Warehouse",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 875655624,
+          "mode": "list",
+          "cachedResultName": "DW_Strategic_Management",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ePdNcVuJvTP40WVA5JnuCbAYDhvSndij9ifjEXZvDbA/edit#gid=875655624"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -3140,
+        220
+      ],
+      "id": "deacdb2c-e5f5-4342-837e-2e73b70efb40",
+      "name": "DW_Strategic_Management",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FwxwuyaoybQzwWCn",
+          "name": "Google Sheets account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        820
+      ],
+      "id": "87087dfe-ecb9-4ef7-98c5-2f767ceb1d1d",
+      "name": "Finance_Limit"
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        700
+      ],
+      "id": "22277ef8-f18f-4d85-ab63-03367d1a1398",
+      "name": "HR_Limit"
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        580
+      ],
+      "id": "97b7c079-96bc-4c56-9a20-ca497ab8b3be",
+      "name": "SalesMarketing_Limit"
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        460
+      ],
+      "id": "eaaff4bf-592c-4c54-acfd-9f771bb9e675",
+      "name": "Operation_Limit"
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        340
+      ],
+      "id": "e5b21b16-3b16-4e5c-88c5-d5ae12423ddc",
+      "name": "PM_Limit"
+    },
+    {
+      "parameters": {
+        "maxItems": 1000,
+        "keep": "lastItems"
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        -3000,
+        220
+      ],
+      "id": "3049cbbf-a7a6-473d-b893-4825514ffd7c",
+      "name": "Strategic_Limit"
+    },
+    {
+      "parameters": {
+        "content": "                                                                            Front-End Data Input",
+        "height": 1100,
+        "width": 1300,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -3280,
+        120
+      ],
+      "id": "58e3c73f-c1bf-45ba-aea7-fb930e4af509",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        220
+      ],
+      "id": "d87120ed-3c14-4884-a858-ceb4f5e5bde7",
+      "name": "Row Number"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        340
+      ],
+      "id": "af726e1e-dd6c-43b2-8b3c-d0034c4ab477",
+      "name": "Row Number1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        460
+      ],
+      "id": "f8effb6c-d5b6-4e34-869e-0230034adec9",
+      "name": "Row Number2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        580
+      ],
+      "id": "87563079-3d3a-46f2-9d4f-72057c0d6f6e",
+      "name": "Row Number3"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        700
+      ],
+      "id": "b52e8d6b-c466-472d-a31a-7366b8e0b58b",
+      "name": "Row Number4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node - Hapus \"row_number\" dari seluruh data\n\nreturn items.map(item => {\n  const newItem = { ...item.json };\n  delete newItem.row_number;\n  return { json: newItem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2860,
+        820
+      ],
+      "id": "4086fa8f-6198-4a17-a369-3e9f79e47f36",
+      "name": "Row Number5"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        220
+      ],
+      "id": "a81ef9bc-5a7b-458d-b700-e5afcb5b8d64",
+      "name": "DW Strategic Management"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        460
+      ],
+      "id": "660934aa-098c-426a-9831-83a7cdc58cd5",
+      "name": "DW Operation"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        580
+      ],
+      "id": "5c9dff88-c937-4e35-bde1-da9ae5c59705",
+      "name": "DW Sales/Marketing"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        700
+      ],
+      "id": "106b75a7-cd3f-4986-b744-c84510a190c0",
+      "name": "DW HR"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        820
+      ],
+      "id": "df25697d-4fcc-4a77-a5b9-4e47f5e427c6",
+      "name": "DW Finance"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -2720,
+        340
+      ],
+      "id": "5a9eb6e8-46e5-4c1a-b1fc-4b50f63766bc",
+      "name": "DW Project Management"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "1hMKgLMzdGYZFTAfiy3btb_YmaYD_zB8G",
+          "mode": "list",
+          "cachedResultName": "DW Project Management.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/1hMKgLMzdGYZFTAfiy3btb_YmaYD_zB8G/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        340
+      ],
+      "id": "9d5f03e6-1956-4ead-b8f6-547df3cc8a5b",
+      "name": "GDrive PM",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "12cKXRZnd1SjhzSl3A_KZY-ne_vtMcrb6",
+          "mode": "list",
+          "cachedResultName": "DW Strategic Management.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/12cKXRZnd1SjhzSl3A_KZY-ne_vtMcrb6/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        220
+      ],
+      "id": "492d3251-a8db-4564-b969-b5c2edf0a678",
+      "name": "GDrive  SM",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "166_i5Ce5slzYT1XUMltTcyxst9mSo2R1",
+          "mode": "list",
+          "cachedResultName": "DW Operation.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/166_i5Ce5slzYT1XUMltTcyxst9mSo2R1/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        460
+      ],
+      "id": "3684d705-2a06-4dab-b1fe-60cba11dea7d",
+      "name": "GDrive Operation",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "1J8q7KK8qDSlMSBU4sl3LyAfgKWXALe_m",
+          "mode": "list",
+          "cachedResultName": "DW Sales-Marketing.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/1J8q7KK8qDSlMSBU4sl3LyAfgKWXALe_m/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        580
+      ],
+      "id": "58f4ba19-29b3-4475-8064-9961b8a32eb5",
+      "name": "GDrive Sales/Marketing",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "1egm8a5vznYYVvZG_3xw3Jg_VAHQ0aBlo",
+          "mode": "list",
+          "cachedResultName": "DW HR.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/1egm8a5vznYYVvZG_3xw3Jg_VAHQ0aBlo/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        700
+      ],
+      "id": "05b2b474-2feb-4a01-9fcf-1f5668810533",
+      "name": "GDrive HR",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "value": "1fp9IGJgrKoOzVJrnb__BrjiTUdX_0IbQ",
+          "mode": "list",
+          "cachedResultName": "DW Finance.csv",
+          "cachedResultUrl": "https://drive.google.com/file/d/1fp9IGJgrKoOzVJrnb__BrjiTUdX_0IbQ/view?usp=drivesdk"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -2580,
+        820
+      ],
+      "id": "115c1c73-efd6-48fb-8318-87712992f82c",
+      "name": "GDrive Finance",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "qyXtd18p1hP0u0lI",
+          "name": "Google Drive account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 6
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        -2460,
+        320
+      ],
+      "id": "f010396e-2e58-46b7-a74a-9640715cafda",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        -2320,
+        400
+      ],
+      "id": "bc636792-a8a7-4579-82f2-ec8f8a7872c1",
+      "name": "Data Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/trigger_gdrive_sync",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2720,
+        960
+      ],
+      "id": "87c7a16f-700e-4ac3-8d2e-3b76b6e4b27e",
+      "name": "Sync Data Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/sync_progress",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2580,
+        960
+      ],
+      "id": "f13992ae-967f-4dbc-9066-a67d5059ac3c",
+      "name": "Sync Progress"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/sync_meta_total_items",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1380,
+        400
+      ],
+      "id": "399440d0-e189-46dd-9e65-571a2127334b",
+      "name": "Sync Meta Total Items"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b6a87a12-75f4-4d25-b6ac-d4adec660df9",
+              "leftValue": "={{$json[\"statusCode\"]}}",
+              "rightValue": "200",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1880,
+        1700
+      ],
+      "id": "87673024-3600-46cf-bd14-fe77da36797d",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1520,
+        400
+      ],
+      "id": "487211f8-92e2-4b59-9edb-80a3f8f4a882",
+      "name": "Empty Trigger1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/auto_batch_data",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2440,
+        960
+      ],
+      "id": "417eb013-fcd8-4d42-b11a-cff57bb98b5f",
+      "name": "Auto Batch Data"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "ETL_Combined_KPI": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_Finance_Division_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_HR_Division_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_Sales/Marketing_Division_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_Operation_Division_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_Project_Management_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI_Strategic_Management_Advanced_Analysis": {
+      "main": [
+        []
+      ]
+    },
+    "KPI Finance": {
+      "main": [
+        [
+          {
+            "node": "Finance Audit Function",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KPI HR": {
+      "main": [
+        [
+          {
+            "node": "Human Capital Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ETL Combination KPI": {
+      "main": [
+        []
+      ]
+    },
+    "Financial Report": {
+      "main": [
+        [
+          {
+            "node": "GSheet Financial Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sales & Marketing Performance Report": {
+      "main": [
+        []
+      ]
+    },
+    "If Finance Data Qualified": {
+      "main": [
+        [
+          {
+            "node": "Finance True Data Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finance False Documentation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finance True Data Qualified": {
+      "main": [
+        [
+          {
+            "node": "Financial Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finance Merge": {
+      "main": [
+        [
+          {
+            "node": "If Finance Data Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ETL Audit Function": {
+      "main": [
+        [
+          {
+            "node": "Finance Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Finance Audit Function": {
+      "main": [
+        [
+          {
+            "node": "Finance Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All Backend Data": {
+      "main": [
+        [
+          {
+            "node": "Empty Trigger1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend Offset Data": {
+      "main": [
+        [
+          {
+            "node": "Size Data Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All Offset Function": {
+      "main": [
+        [
+          {
+            "node": "Post Offset Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend Data Documentation": {
+      "main": [
+        []
+      ]
+    },
+    "Size Data Merge": {
+      "main": [
+        [
+          {
+            "node": "All Offset Function",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "DW_Finance",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DW_HR",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DW_Sales/Marketing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DW_Operation",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DW_Project_Management",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "DW_Strategic_Management",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sync Data Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Empty Trigger": {
+      "main": [
+        [
+          {
+            "node": "All Backend Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync After Batch": {
+      "main": [
+        []
+      ]
+    },
+    "DW_Finance": {
+      "main": [
+        [
+          {
+            "node": "Finance_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW_HR": {
+      "main": [
+        [
+          {
+            "node": "HR_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW_Sales/Marketing": {
+      "main": [
+        [
+          {
+            "node": "SalesMarketing_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW_Operation": {
+      "main": [
+        [
+          {
+            "node": "Operation_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW_Project_Management": {
+      "main": [
+        [
+          {
+            "node": "PM_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW_Strategic_Management": {
+      "main": [
+        [
+          {
+            "node": "Strategic_Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finance_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HR_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SalesMarketing_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Operation_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PM_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Strategic_Limit": {
+      "main": [
+        [
+          {
+            "node": "Row Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number": {
+      "main": [
+        [
+          {
+            "node": "DW Strategic Management",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number1": {
+      "main": [
+        [
+          {
+            "node": "DW Project Management",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number2": {
+      "main": [
+        [
+          {
+            "node": "DW Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number3": {
+      "main": [
+        [
+          {
+            "node": "DW Sales/Marketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number4": {
+      "main": [
+        [
+          {
+            "node": "DW HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Number5": {
+      "main": [
+        [
+          {
+            "node": "DW Finance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW Strategic Management": {
+      "main": [
+        [
+          {
+            "node": "GDrive  SM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW Project Management": {
+      "main": [
+        [
+          {
+            "node": "GDrive PM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW Operation": {
+      "main": [
+        [
+          {
+            "node": "GDrive Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW Sales/Marketing": {
+      "main": [
+        [
+          {
+            "node": "GDrive Sales/Marketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW HR": {
+      "main": [
+        [
+          {
+            "node": "GDrive HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DW Finance": {
+      "main": [
+        [
+          {
+            "node": "GDrive Finance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GDrive  SM": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GDrive PM": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "GDrive Operation": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "GDrive Sales/Marketing": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "GDrive HR": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "GDrive Finance": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Data Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Data Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sync Progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Progress": {
+      "main": [
+        [
+          {
+            "node": "Auto Batch Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Trigger": {
+      "main": [
+        [
+          {
+            "node": "Empty Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Meta Total Items": {
+      "main": [
+        [
+          {
+            "node": "Backend Data Documentation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        []
+      ]
+    },
+    "Empty Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Sync Meta Total Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto Batch Data": {
+      "main": [
+        [
+          {
+            "node": "Data Trigger",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "488b7042-004f-4d31-889d-e3b7b1a315e9",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f7de965e17c2603b3ea97b543aef74624c8eea95a5d440254fb306b228b8ae0f"
+  },
+  "id": "GHdR7m5TpBy05NmK",
+  "tags": []
+}
